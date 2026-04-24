@@ -52,6 +52,22 @@ npm run dev
 3. 在任一窗口启动 Agent 任务或编辑文档。
 4. 另一窗口会实时看到文档和 PPT 大纲同步。
 
+当前 MVP 可演示：
+
+- Scene A：IM 风格自然语言入口，支持输入任务和“进度到哪了”查询
+- Scene B：Agent 任务规划步骤与确认继续
+- Scene C：协同文档生成、编辑、表格/图片占位插入
+- Scene D：PPT 大纲生成、标题修改、排练备注生成
+- Scene E：移动端和桌面端通过 Yjs 实时同步，离线编辑后重连合并
+- Scene F：生成飞书文档链接、PPT 文件链接和归档摘要
+
+飞书 Adapter MVP：
+
+- `GET http://localhost:8787/api/feishu/capabilities`
+- `POST http://localhost:8787/api/feishu/events`
+
+`/api/feishu/events` 支持飞书 URL verification 的 `challenge` 回显，也接受 `im.message.receive_v1` 消息事件。配置真实 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 后，可继续接入飞书消息发送、Docx 和 Drive OpenAPI。
+
 移动端打包准备：
 
 ```bash

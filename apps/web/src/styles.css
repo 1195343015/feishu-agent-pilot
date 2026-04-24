@@ -134,9 +134,9 @@ textarea:focus {
 
 .grid {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1.2fr) minmax(300px, 0.8fr);
+  grid-template-columns: 320px minmax(320px, 0.75fr) minmax(0, 1.1fr) minmax(300px, 0.85fr);
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .panel {
@@ -167,13 +167,21 @@ textarea:focus {
   gap: 14px;
 }
 
+.editor-panel {
+  grid-column: span 2;
+}
+
+.delivery-panel {
+  min-height: 300px;
+}
+
 .primary-button,
+.secondary-button,
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 0;
   border-radius: 6px;
   cursor: pointer;
 }
@@ -186,12 +194,73 @@ textarea:focus {
   font-weight: 700;
 }
 
+.secondary-button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid #d5dce9;
+  background: #fff;
+  color: #243047;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .icon-button {
   width: 36px;
   height: 36px;
   border: 1px solid #d5dce9;
   background: #f9fafc;
   color: #243047;
+}
+
+.panel-actions,
+.tool-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-row {
+  margin-bottom: 12px;
+}
+
+.chat-feed {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.chat-message {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #d8deea;
+  background: #f9fafc;
+}
+
+.chat-message.user {
+  border-color: #b9cdee;
+  background: #eef5ff;
+}
+
+.chat-message.agent {
+  border-color: #bddfc9;
+  background: #effaf3;
+}
+
+.chat-message span {
+  display: block;
+  margin-bottom: 4px;
+  color: #62708a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.chat-message p {
+  margin: 0;
+  color: #243047;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .task-card {
@@ -203,6 +272,56 @@ textarea:focus {
   border: 1px solid #d8deea;
   border-radius: 8px;
   background: #f7f9fc;
+}
+
+.step-list {
+  display: grid;
+  gap: 10px;
+}
+
+.step-card {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8deea;
+  border-radius: 8px;
+  background: #f9fafc;
+}
+
+.step-card > span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 999px;
+  background: #e7eefb;
+  color: #285ca8;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.step-card.done > span {
+  background: #dff5e6;
+  color: #146c3f;
+}
+
+.step-card.running > span,
+.step-card.waiting_confirm > span {
+  background: #fff1cc;
+  color: #8b6200;
+}
+
+.step-card strong {
+  display: block;
+  color: #172033;
+  font-size: 14px;
+}
+
+.step-card p {
+  margin: 4px 0 0;
+  color: #62708a;
+  font-size: 12px;
 }
 
 .task-icon {
@@ -279,10 +398,29 @@ textarea:focus {
   background: #f9fafc;
 }
 
+.delivery-card {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.delivery-card p {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f9fc;
+  color: #243047;
+  line-height: 1.55;
+}
+
 @media (max-width: 1020px) {
   .grid,
   .workspace-meta {
     grid-template-columns: 1fr;
+  }
+
+  .editor-panel {
+    grid-column: auto;
   }
 
   .topbar {

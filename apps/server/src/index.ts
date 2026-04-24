@@ -27,6 +27,47 @@ app.get("/health", async () => ({
   service: "agent-pilot-sync"
 }));
 
+app.get("/api/feishu/capabilities", async () => ({
+  adapter: "feishu",
+  mode: "mvp",
+  supports: [
+    "event.challenge",
+    "im.message.receive_v1",
+    "task.start.from_im",
+    "delivery.link.placeholder"
+  ],
+  requiredEnvForRealOpenApi: ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]
+}));
+
+app.post("/api/feishu/events", async (request, reply) => {
+  const body = request.body as FeishuEventPayload | undefined;
+
+  if (body?.challenge) {
+    return { challenge: body.challenge };
+  }
+
+  const eventType = body?.header?.event_type;
+  if (eventType === "im.message.receive_v1") {
+    const message = body?.event?.message;
+    const chatId = message?.chat_id ?? "unknown-chat";
+    const text = extractFeishuText(message);
+    app.log.info({ chatId, text }, "Received Feishu IM event");
+    return {
+      ok: true,
+      action: "task.start.from_im",
+      chatId,
+      prompt: text,
+      note: "MVP adapter accepted the event. Real OpenAPI send is enabled after FEISHU_APP_ID/FEISHU_APP_SECRET are configured."
+    };
+  }
+
+  reply.code(202);
+  return {
+    ok: true,
+    ignored: eventType ?? "unknown"
+  };
+});
+
 const server = await app.listen({ host, port });
 const wss = new WebSocketServer({ noServer: true });
 
@@ -39,6 +80,32 @@ app.server.on("upgrade", (request, socket, head) => {
 });
 
 app.log.info(`Yjs sync endpoint ready at ws://localhost:${port}/:workspaceId`);
+
+type FeishuEventPayload = {
+  challenge?: string;
+  header?: {
+    event_type?: string;
+  };
+  event?: {
+    message?: {
+      chat_id?: string;
+      content?: string;
+    };
+  };
+};
+
+type FeishuMessageEvent = NonNullable<NonNullable<FeishuEventPayload["event"]>["message"]>;
+
+function extractFeishuText(message: FeishuMessageEvent | undefined): string {
+  if (!message || typeof message.content !== "string") return "";
+
+  try {
+    const parsed = JSON.parse(message.content) as { text?: string };
+    return parsed.text ?? message.content;
+  } catch {
+    return message.content;
+  }
+}
 
 function getRoom(roomName: string): Room {
   const existing = rooms.get(roomName);

@@ -20,6 +20,7 @@ export type AgentStepType =
   | "doc_generate"
   | "doc_review"
   | "slide_generate"
+  | "rehearsal"
   | "delivery";
 
 export type OperationType =
@@ -83,6 +84,21 @@ export type Slide = {
   title: string;
   notes: string;
   elements: SlideElement[];
+};
+
+export type ChatMessage = {
+  id: string;
+  role: "user" | "agent" | "system";
+  content: string;
+  createdAt: string;
+};
+
+export type DeliveryArtifact = {
+  id: string;
+  docLink: string;
+  deckLink: string;
+  archiveSummary: string;
+  createdAt: string;
 };
 
 export type ConnectionState = "connecting" | "connected" | "disconnected";
