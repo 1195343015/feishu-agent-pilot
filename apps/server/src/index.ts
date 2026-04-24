@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as decoding from "lib0/decoding";
@@ -52,16 +53,7 @@ app.post("/api/agent/generate", async (request) => {
     return createFallbackGeneration("请根据 IM 讨论生成需求文档和汇报 PPT", context);
   }
 
-  if (!process.env.OPENAI_API_KEY) {
-    return createFallbackGeneration(prompt, context);
-  }
-
-  try {
-    return await generateWithOpenAI(prompt, context);
-  } catch (error) {
-    app.log.error({ error }, "LLM generation failed, using fallback");
-    return createFallbackGeneration(prompt, context);
-  }
+  return generateAgentPlan(prompt, context);
 });
 
 app.get("/api/feishu/capabilities", async () => ({
@@ -71,9 +63,12 @@ app.get("/api/feishu/capabilities", async () => ({
     "event.challenge",
     "im.message.receive_v1",
     "task.start.from_im",
+    "yjs.workspace.write",
+    "bot.message.reply.optional",
     "delivery.link.placeholder"
   ],
-  requiredEnvForRealOpenApi: ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]
+  requiredEnvForRealOpenApi: ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+  optionalEnv: ["FEISHU_VERIFICATION_TOKEN", "FEISHU_OPEN_BASE_URL"]
 }));
 
 app.post("/api/feishu/events", async (request, reply) => {
@@ -83,18 +78,51 @@ app.post("/api/feishu/events", async (request, reply) => {
     return { challenge: body.challenge };
   }
 
+  if (!isValidFeishuToken(body)) {
+    reply.code(401);
+    return {
+      ok: false,
+      error: "invalid_feishu_verification_token"
+    };
+  }
+
   const eventType = body?.header?.event_type;
   if (eventType === "im.message.receive_v1") {
     const message = body?.event?.message;
-    const chatId = message?.chat_id ?? "unknown-chat";
+    const chatId = message?.chat_id;
     const text = extractFeishuText(message);
-    app.log.info({ chatId, text }, "Received Feishu IM event");
+    const senderId = body?.event?.sender?.sender_id?.user_id ?? body?.event?.sender?.sender_id?.open_id ?? "feishu-user";
+    const messageId = message?.message_id;
+    if (!chatId || !text) {
+      reply.code(400);
+      return {
+        ok: false,
+        error: "missing_chat_id_or_text"
+      };
+    }
+
+    const workspaceId = toFeishuWorkspaceId(chatId);
+    app.log.info({ chatId, workspaceId, text }, "Received Feishu IM event");
+
+    const generation = await generateAgentPlan(text, `飞书会话 ${chatId} 中的 IM 指令`);
+    writeAgentGenerationToRoom({
+      workspaceId,
+      prompt: text,
+      senderId,
+      sourceMessageId: messageId,
+      generation
+    });
+
+    await sendFeishuText(chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\nWorkspace: ${workspaceId}`);
+
     return {
       ok: true,
       action: "task.start.from_im",
       chatId,
+      workspaceId,
       prompt: text,
-      note: "MVP adapter accepted the event. Real OpenAPI send is enabled after FEISHU_APP_ID/FEISHU_APP_SECRET are configured."
+      provider: generation.provider,
+      note: "Feishu IM event has started an Agent task and written the result into the mapped Yjs workspace."
     };
   }
 
@@ -124,11 +152,19 @@ type FeishuEventPayload = {
     event_type?: string;
   };
   event?: {
+    sender?: {
+      sender_id?: {
+        user_id?: string;
+        open_id?: string;
+      };
+    };
     message?: {
+      message_id?: string;
       chat_id?: string;
       content?: string;
     };
   };
+  token?: string;
 };
 
 type AgentGenerateRequest = {
@@ -161,6 +197,39 @@ type ChatCompletionResponse = {
     };
   }>;
 };
+
+type FeishuTenantTokenResponse = {
+  code?: number;
+  msg?: string;
+  tenant_access_token?: string;
+  expire?: number;
+};
+
+type FeishuMessageResponse = {
+  code?: number;
+  msg?: string;
+};
+
+type AgentRoomWriteInput = {
+  workspaceId: string;
+  prompt: string;
+  senderId: string;
+  sourceMessageId?: string;
+  generation: AgentGeneration;
+};
+
+async function generateAgentPlan(prompt: string, context: string): Promise<AgentGeneration> {
+  if (!process.env.OPENAI_API_KEY) {
+    return createFallbackGeneration(prompt, context);
+  }
+
+  try {
+    return await generateWithOpenAI(prompt, context);
+  } catch (error) {
+    app.log.error({ error }, "LLM generation failed, using fallback");
+    return createFallbackGeneration(prompt, context);
+  }
+}
 
 async function generateWithOpenAI(prompt: string, context: string): Promise<AgentGeneration> {
   const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
@@ -316,6 +385,147 @@ function extractFeishuText(message: FeishuMessageEvent | undefined): string {
   } catch {
     return message.content;
   }
+}
+
+function isValidFeishuToken(body: FeishuEventPayload | undefined): boolean {
+  const expected = process.env.FEISHU_VERIFICATION_TOKEN;
+  if (!expected) return true;
+  return body?.token === expected || body?.header?.event_type !== undefined;
+}
+
+function toFeishuWorkspaceId(chatId: string): string {
+  return `feishu-${chatId}`;
+}
+
+function writeAgentGenerationToRoom(input: AgentRoomWriteInput): void {
+  const room = getRoom(input.workspaceId);
+  const now = new Date().toISOString();
+  const taskId = randomUUID();
+
+  room.doc.transact(() => {
+    const agentState = room.doc.getMap("agentState");
+    const document = room.doc.getText("document");
+    const slides = room.doc.getArray("slides");
+    const messages = room.doc.getArray<Y.Map<unknown>>("messages");
+
+    messages.push([
+      objectToYMap({
+        id: randomUUID(),
+        role: "user",
+        content: input.prompt,
+        createdAt: now
+      })
+    ]);
+
+    agentState.set("task", {
+      id: taskId,
+      workspaceId: input.workspaceId,
+      sourceMessageId: input.sourceMessageId,
+      status: "waiting_confirm",
+      title: input.prompt,
+      createdBy: input.senderId,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    agentState.set(
+      "steps",
+      input.generation.steps.map((step, index) => ({
+        id: randomUUID(),
+        taskId,
+        type: step.type,
+        status: index < 3 ? "done" : step.type === "rehearsal" ? "waiting_confirm" : "pending",
+        summary: step.summary
+      }))
+    );
+    agentState.set("status", "waiting_confirm");
+    agentState.delete("delivery");
+
+    document.delete(0, document.length);
+    document.insert(0, input.generation.documentMarkdown);
+
+    slides.delete(0, slides.length);
+    input.generation.slides.forEach((slide) => {
+      slides.push([
+        objectToYMap({
+          id: randomUUID(),
+          title: slide.title,
+          notes: slide.notes,
+          elements: []
+        })
+      ]);
+    });
+
+    messages.push([
+      objectToYMap({
+        id: randomUUID(),
+        role: "agent",
+        content: `${input.generation.summary}（来源：${input.generation.provider === "openai" ? "LLM" : "本地 fallback"}）`,
+        createdAt: new Date().toISOString()
+      })
+    ]);
+  });
+}
+
+function objectToYMap(value: Record<string, unknown>): Y.Map<unknown> {
+  const map = new Y.Map<unknown>();
+  for (const [key, entry] of Object.entries(value)) {
+    map.set(key, entry);
+  }
+  return map;
+}
+
+async function sendFeishuText(chatId: string, text: string): Promise<void> {
+  if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
+    app.log.info({ chatId }, "Skipping Feishu bot reply because app credentials are not configured");
+    return;
+  }
+
+  try {
+    const token = await getFeishuTenantAccessToken();
+    const baseUrl = getFeishuBaseUrl();
+    const response = await fetch(`${baseUrl}/open-apis/im/v1/messages?receive_id_type=chat_id`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text })
+      })
+    });
+    const payload = (await response.json()) as FeishuMessageResponse;
+    if (!response.ok || payload.code !== 0) {
+      app.log.warn({ status: response.status, payload }, "Feishu bot reply failed");
+    }
+  } catch (error) {
+    app.log.warn({ error }, "Feishu bot reply failed");
+  }
+}
+
+async function getFeishuTenantAccessToken(): Promise<string> {
+  const baseUrl = getFeishuBaseUrl();
+  const response = await fetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      app_id: process.env.FEISHU_APP_ID,
+      app_secret: process.env.FEISHU_APP_SECRET
+    })
+  });
+  const payload = (await response.json()) as FeishuTenantTokenResponse;
+  if (!response.ok || payload.code !== 0 || !payload.tenant_access_token) {
+    throw new Error(`Failed to get Feishu tenant token: ${response.status} ${JSON.stringify(payload)}`);
+  }
+  return payload.tenant_access_token;
+}
+
+function getFeishuBaseUrl(): string {
+  return (process.env.FEISHU_OPEN_BASE_URL ?? "https://open.feishu.cn").replace(/\/$/, "");
 }
 
 function getRoom(roomName: string): Room {

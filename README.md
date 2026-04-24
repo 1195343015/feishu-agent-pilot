@@ -78,9 +78,38 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 - `POST http://localhost:8787/api/feishu/events`
 - `POST http://localhost:8787/api/agent/generate`
 
-`/api/feishu/events` 支持飞书 URL verification 的 `challenge` 回显，也接受 `im.message.receive_v1` 消息事件。配置真实 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 后，可继续接入飞书消息发送、Docx 和 Drive OpenAPI。
+`/api/feishu/events` 支持飞书 URL verification 的 `challenge` 回显，也接受 `im.message.receive_v1` 消息事件。收到飞书 IM 消息后，后端会把 `chat_id` 映射为 `feishu-{chat_id}` workspace，调用 Agent Planner，并把任务、文档、PPT 大纲写入对应的 Yjs workspace。配置真实 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 后，后端会尝试向原飞书群聊/单聊回发任务启动消息。
 
 `/api/agent/generate` 会在配置 `OPENAI_API_KEY` 时调用 OpenAI 兼容 Chat Completions 接口，返回 Agent 计划、需求文档 Markdown 和 5 页 PPT 大纲；未配置时返回本地 fallback。
+
+本地模拟飞书 IM 事件：
+
+```powershell
+$body = @{
+  header = @{ event_type = "im.message.receive_v1" }
+  event = @{
+    sender = @{ sender_id = @{ user_id = "demo-user" } }
+    message = @{
+      message_id = "msg-demo"
+      chat_id = "oc_demo"
+      content = '{"text":"根据这段讨论生成需求文档和 5 页汇报 PPT"}'
+    }
+  }
+} | ConvertTo-Json -Depth 8
+
+Invoke-RestMethod -Method Post `
+  -Uri http://localhost:8787/api/feishu/events `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+然后在 Web 客户端把 `Workspace` 改为：
+
+```text
+feishu-oc_demo
+```
+
+即可看到由飞书事件触发的 Agent 任务、文档和 PPT 大纲。
 
 ## 飞书 CLI 辅助开发
 
