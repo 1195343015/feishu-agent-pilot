@@ -70,6 +70,7 @@ app.get("/api/feishu/capabilities", async () => ({
     "task.start.from_im",
     "yjs.workspace.write",
     "feishu.docx.create",
+    "feishu.presentation.create",
     "bot.message.reply.optional",
     "encrypted_callback.optional",
     "delivery.link.placeholder"
@@ -269,6 +270,17 @@ type FeishuDocxCreateResponse = {
   data?: {
     document?: {
       document_id?: string;
+      title?: string;
+    };
+  };
+};
+
+type FeishuPresentationCreateResponse = {
+  code?: number;
+  msg?: string;
+  data?: {
+    presentation?: {
+      presentation_id?: string;
       title?: string;
     };
   };
@@ -747,6 +759,7 @@ async function createDeliveryForWorkspace(workspaceId: string): Promise<Delivery
   const fallbackDocLink = `local://workspace/${encodeURIComponent(workspaceId)}/document`;
   const fallbackDeckLink = `local://workspace/${encodeURIComponent(workspaceId)}/slides`;
   let docLink = fallbackDocLink;
+  let deckLink = fallbackDeckLink;
 
   try {
     const documentId = await createFeishuDocument(title, documentMarkdown, slides);
@@ -755,10 +768,17 @@ async function createDeliveryForWorkspace(workspaceId: string): Promise<Delivery
     app.log.warn({ error: toErrorInfo(error), workspaceId }, "Feishu docx delivery failed, using local delivery links");
   }
 
+  try {
+    const presentationId = await createFeishuPresentation(`${title} - PPT`, slides);
+    deckLink = toFeishuPresentationLink(presentationId);
+  } catch (error) {
+    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Feishu presentation delivery failed, using local delivery links");
+  }
+
   return {
     id: randomUUID(),
     docLink,
-    deckLink: fallbackDeckLink,
+    deckLink,
     archiveSummary: `已归档「${task?.title ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT 大纲和 Agent 执行摘要。`,
     createdAt: new Date().toISOString()
   };
@@ -829,6 +849,77 @@ async function createFeishuDocument(
   return documentId;
 }
 
+async function createFeishuPresentation(
+  title: string,
+  slides: GeneratedSlide[]
+): Promise<string> {
+  if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
+    throw new Error("FEISHU_APP_ID/FEISHU_APP_SECRET are not configured");
+  }
+
+  const token = await getFeishuTenantAccessToken();
+  const baseUrl = getFeishuBaseUrl();
+  const createResponse = await fetch(`${baseUrl}/open-apis/slides/v1/presentations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      title: title.slice(0, 120),
+      folder_token: process.env.FEISHU_DOC_FOLDER_TOKEN || undefined
+    })
+  });
+  const createPayload = (await createResponse.json()) as FeishuPresentationCreateResponse;
+  const presentationId = createPayload.data?.presentation?.presentation_id;
+  if (!createResponse.ok || createPayload.code !== 0 || !presentationId) {
+    throw new Error(`Failed to create Feishu presentation: ${createResponse.status} ${JSON.stringify(createPayload)}`);
+  }
+
+  await tryAppendFeishuPresentationSlides(presentationId, token, slides);
+  return presentationId;
+}
+
+async function tryAppendFeishuPresentationSlides(
+  presentationId: string,
+  token: string,
+  slides: GeneratedSlide[]
+): Promise<void> {
+  try {
+    const baseUrl = getFeishuBaseUrl();
+    for (let i = 0; i < slides.length; i++) {
+      const slide = slides[i];
+      await fetch(`${baseUrl}/open-apis/slides/v1/presentations/${presentationId}/slides`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          page: {
+            title: slide.title,
+            notes: slide.notes,
+            elements: [
+              {
+                type: "text",
+                text: {
+                  content: slide.title,
+                  style: {
+                    font_size: 32,
+                    bold: true
+                  }
+                }
+              }
+            ]
+          }
+        })
+      });
+    }
+  } catch (error) {
+    app.log.warn({ error: toErrorInfo(error), presentationId }, "Failed to append slides to presentation, but presentation was created successfully");
+  }
+}
+
 async function tryAppendFeishuDocBlocks(
   documentId: string,
   token: string,
@@ -895,6 +986,11 @@ function toErrorInfo(error: unknown): { name?: string; message: string; stack?: 
 function toFeishuDocLink(documentId: string): string {
   const base = (process.env.FEISHU_DOC_BASE_URL ?? "https://feishu.cn/docx").replace(/\/$/, "");
   return `${base}/${documentId}`;
+}
+
+function toFeishuPresentationLink(presentationId: string): string {
+  const base = (process.env.FEISHU_DOC_BASE_URL ?? "https://feishu.cn/slides").replace(/\/$/, "");
+  return `${base}/${presentationId}`;
 }
 
 async function sendFeishuText(chatId: string, text: string): Promise<void> {
