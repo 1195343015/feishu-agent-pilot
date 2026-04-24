@@ -101,4 +101,22 @@ export type DeliveryArtifact = {
   createdAt: string;
 };
 
+export type GeneratedAgentStep = {
+  type: AgentStepType;
+  summary: string;
+};
+
+export type GeneratedSlide = {
+  title: string;
+  notes: string;
+};
+
+export type AgentGeneration = {
+  provider: "openai" | "fallback";
+  summary: string;
+  steps: GeneratedAgentStep[];
+  documentMarkdown: string;
+  slides: GeneratedSlide[];
+};
+
 export type ConnectionState = "connecting" | "connected" | "disconnected";

@@ -31,6 +31,7 @@
 - y-indexeddb：端侧离线持久化和重连合并
 - Node.js + Fastify：同步服务与后端服务入口
 - PostgreSQL / Supabase：后续承载任务、消息、权限、交付物等结构化状态
+- lark-cli：飞书 OpenAPI 开发、授权、权限检查和调试工具
 
 ## 快速开始
 
@@ -38,6 +39,16 @@
 npm install
 npm run dev
 ```
+
+如需启用真实 LLM Planner，复制 `.env.example` 并配置：
+
+```bash
+OPENAI_API_KEY=你的 API Key
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+没有配置 `OPENAI_API_KEY` 时，后端会自动使用本地 fallback，演示链路仍可完整运行。
 
 启动后：
 
@@ -65,8 +76,58 @@ npm run dev
 
 - `GET http://localhost:8787/api/feishu/capabilities`
 - `POST http://localhost:8787/api/feishu/events`
+- `POST http://localhost:8787/api/agent/generate`
 
 `/api/feishu/events` 支持飞书 URL verification 的 `challenge` 回显，也接受 `im.message.receive_v1` 消息事件。配置真实 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 后，可继续接入飞书消息发送、Docx 和 Drive OpenAPI。
+
+`/api/agent/generate` 会在配置 `OPENAI_API_KEY` 时调用 OpenAI 兼容 Chat Completions 接口，返回 Agent 计划、需求文档 Markdown 和 5 页 PPT 大纲；未配置时返回本地 fallback。
+
+## 飞书 CLI 辅助开发
+
+本项目运行时不依赖 `lark-cli`，运行时仍由 `apps/server` 的 Feishu Adapter 负责接收事件和调用 OpenAPI。`lark-cli` 用作开发和调试工具，适合完成应用初始化、OAuth 登录、权限检查、接口 dry-run 和 schema 查询。
+
+安装：
+
+```bash
+npm install -g @larksuite/cli
+```
+
+常用命令：
+
+```bash
+# 创建/配置飞书应用凭据
+npm run feishu:config
+
+# 推荐权限登录
+npm run feishu:login
+
+# 查看登录状态
+npm run feishu:status
+
+# 查看可申请权限
+npm run feishu:scopes
+```
+
+调试当前项目会用到的能力：
+
+```bash
+# 发送 IM 消息 dry-run，避免误发
+lark-cli im +messages-send --chat-id oc_xxx --text "Agent-Pilot test" --dry-run
+
+# 创建飞书文档，Markdown 输入适合对接当前 Yjs 文档导出
+lark-cli docs +create --api-version v2 --doc-format markdown --content "# Agent-Pilot\n\n- 多端协同\n- 文档生成\n- PPT 交付"
+
+# 直接调用原始 OpenAPI，用于验证 Feishu Adapter 后续要接的接口
+lark-cli api POST /open-apis/im/v1/messages --params '{"receive_id_type":"chat_id"}' --data '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"Hello\"}"}'
+```
+
+建议用法：
+
+1. 用 `lark-cli config init --new` 创建或绑定飞书自建应用。
+2. 用 `lark-cli auth login --recommend` 完成授权。
+3. 用 `lark-cli auth status` 确认 Messenger、Docs、Drive、Slides 相关权限。
+4. 用 dry-run 验证发消息、建文档、上传文件等接口参数。
+5. 把验证通过的参数和权限同步到 `.env`，再由 `apps/server` 的 Feishu Adapter 实现正式运行时调用。
 
 移动端打包准备：
 

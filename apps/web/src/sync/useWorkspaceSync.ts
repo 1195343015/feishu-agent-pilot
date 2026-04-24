@@ -10,6 +10,7 @@ import {
   yMapToChatMessage,
   yMapToSlide,
   type AgentStep,
+  type AgentGeneration,
   type AgentTask,
   type ChatMessage,
   type ConnectionState,
@@ -44,7 +45,7 @@ type WorkspaceSyncState = {
   connect: (settings?: Partial<Pick<WorkspaceSyncState, "workspaceId" | "userId" | "syncUrl">>) => void;
   disconnect: () => void;
   updateDocument: (value: string) => void;
-  sendMessage: (content: string) => void;
+  sendMessage: (content: string) => Promise<void>;
   confirmPlan: () => void;
   rehearseSlides: () => void;
   createDelivery: () => void;
@@ -162,7 +163,7 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     text.insert(0, value);
   },
 
-  sendMessage(content) {
+  async sendMessage(content) {
     const doc = get().doc;
     if (!doc || !content.trim()) return;
 
@@ -186,62 +187,48 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
       title: prompt,
       createdBy: get().userId
     });
-    const steps: AgentStep[] = [
-      createStep({ taskId: task.id, type: "plan", status: "done", summary: "理解 IM 指令并拆解任务" }),
-      createStep({ taskId: task.id, type: "doc_generate", status: "done", summary: "生成需求文档草稿" }),
-      createStep({ taskId: task.id, type: "slide_generate", status: "done", summary: "生成 5 页汇报 PPT 大纲" }),
-      createStep({ taskId: task.id, type: "rehearsal", status: "waiting_confirm", summary: "等待用户确认后进入排练修改" }),
-      createStep({ taskId: task.id, type: "delivery", status: "pending", summary: "生成飞书文档链接和归档摘要" })
-    ];
 
     workspace.agentState.set("task", task);
-    workspace.agentState.set("steps", steps);
+    workspace.agentState.set("steps", [
+      createStep({ taskId: task.id, type: "plan", status: "running", summary: "调用 LLM Planner 生成任务计划" })
+    ]);
     workspace.agentState.delete("delivery");
-    workspace.agentState.set("status", "planning");
+    workspace.agentState.set("status", "running");
     workspace.messages.push([
-      chatMessageToYMap(createChatMessage({ role: "agent", content: "收到，我会先生成需求文档，再整理为演示稿大纲。" }))
+      chatMessageToYMap(createChatMessage({ role: "agent", content: "收到，我会调用 Planner 生成任务计划、需求文档和 PPT 大纲。" }))
     ]);
 
-    const generated = [
-      "# 需求文档草稿",
-      "",
-      `## 用户指令`,
-      prompt,
-      "",
-      "## Agent 初步拆解",
-      "- 捕捉 IM 中的业务需求和上下文",
-      "- 生成需求背景、目标、核心流程和验收标准",
-      "- 根据文档结构生成 5 页汇报 PPT 大纲",
-      "- 支持用户在移动端或桌面端继续修改",
-      "- 等待确认后排练并交付到飞书",
-      "",
-      "## 验收标准",
-      "- 移动端和桌面端实时看到同一份状态",
-      "- 一端修改文档或 PPT 标题，另一端无刷新同步",
-      "- Agent 进度、文档、PPT 和交付结果均可查询"
-    ].join("\n");
+    const generation = await requestAgentGeneration(get().syncUrl, prompt, workspace.document.toString());
+    const generatedSteps = generation.steps.map((step, index) =>
+      createStep({
+        taskId: task.id,
+        type: step.type,
+        summary: step.summary,
+        status: index < 3 ? "done" : step.type === "rehearsal" ? "waiting_confirm" : "pending"
+      })
+    );
+    if (!generatedSteps.some((step) => step.type === "delivery")) {
+      generatedSteps.push(
+        createStep({ taskId: task.id, type: "delivery", status: "pending", summary: "生成飞书文档链接和归档摘要" })
+      );
+    }
 
     const text = workspace.document;
     text.delete(0, text.length);
-    text.insert(0, generated);
+    text.insert(0, generation.documentMarkdown);
 
     workspace.slides.delete(0, workspace.slides.length);
-    [
-      "项目背景与痛点",
-      "Agent-Pilot 目标",
-      "多端协同框架",
-      "文档到 PPT 的自动化链路",
-      "交付物与后续计划"
-    ].forEach((title) => {
+    generation.slides.forEach((slide) => {
       workspace.slides.push([
         slideToYMap(
           createSlide({
-            title,
-            notes: `围绕「${prompt}」生成的演示页。`
+            title: slide.title,
+            notes: slide.notes
           })
         )
       ]);
     });
+    workspace.agentState.set("steps", generatedSteps);
 
     window.setTimeout(() => {
       const currentDoc = get().doc;
@@ -249,7 +236,12 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
       const currentWorkspace = getSharedWorkspace(currentDoc);
       currentWorkspace.agentState.set("status", "waiting_confirm");
       currentWorkspace.messages.push([
-        chatMessageToYMap(createChatMessage({ role: "agent", content: "文档和 PPT 大纲已生成。确认后我可以进入排练修改或生成交付物。" }))
+        chatMessageToYMap(
+          createChatMessage({
+            role: "agent",
+            content: `${generation.summary}（来源：${generation.provider === "openai" ? "LLM" : "本地 fallback"}）`
+          })
+        )
       ]);
     }, 800);
   },
@@ -358,4 +350,26 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
 
 function isProgressQuery(input: string): boolean {
   return /进度|到哪|状态|完成了吗|现在/.test(input);
+}
+
+async function requestAgentGeneration(syncUrl: string, prompt: string, context: string): Promise<AgentGeneration> {
+  const response = await fetch(`${toHttpBaseUrl(syncUrl)}/api/agent/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ prompt, context })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Agent generation failed: ${response.status}`);
+  }
+
+  return (await response.json()) as AgentGeneration;
+}
+
+function toHttpBaseUrl(syncUrl: string): string {
+  if (syncUrl.startsWith("wss://")) return syncUrl.replace("wss://", "https://");
+  if (syncUrl.startsWith("ws://")) return syncUrl.replace("ws://", "http://");
+  return syncUrl.replace(/\/$/, "");
 }

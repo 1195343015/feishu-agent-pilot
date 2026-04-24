@@ -8,7 +8,12 @@
     "dev:web": "npm run dev -w @agent-pilot/web",
     "dev:server": "npm run dev -w @agent-pilot/server",
     "build": "npm run build --workspaces",
-    "typecheck": "npm run typecheck --workspaces"
+    "typecheck": "npm run typecheck --workspaces",
+    "feishu:config": "lark-cli config init --new",
+    "feishu:login": "lark-cli auth login --recommend",
+    "feishu:status": "lark-cli auth status",
+    "feishu:scopes": "lark-cli auth scopes",
+    "feishu:capabilities": "lark-cli --help"
   },
   "workspaces": [
     "apps/*",
