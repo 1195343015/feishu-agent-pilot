@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -64,14 +65,24 @@ app.get("/api/feishu/capabilities", async () => ({
     "event.challenge",
     "im.message.receive_v1",
     "event.long_connection",
+    "im.intent.progress_query",
+    "im.intent.delivery_create",
     "task.start.from_im",
     "yjs.workspace.write",
+    "feishu.docx.create",
     "bot.message.reply.optional",
     "encrypted_callback.optional",
     "delivery.link.placeholder"
   ],
   requiredEnvForRealOpenApi: ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
-  optionalEnv: ["FEISHU_EVENT_MODE", "FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY", "FEISHU_OPEN_BASE_URL"]
+  optionalEnv: [
+    "FEISHU_EVENT_MODE",
+    "FEISHU_VERIFICATION_TOKEN",
+    "FEISHU_ENCRYPT_KEY",
+    "FEISHU_OPEN_BASE_URL",
+    "FEISHU_DOC_BASE_URL",
+    "FEISHU_DOC_FOLDER_TOKEN"
+  ]
 }));
 
 app.post("/api/feishu/events", async (request, reply) => {
@@ -114,7 +125,7 @@ app.post("/api/feishu/events", async (request, reply) => {
 
     return {
       ok: true,
-      action: "task.queued.from_im",
+      action: queued.action,
       chatId,
       workspaceId: queued.workspaceId,
       prompt: text,
@@ -178,7 +189,10 @@ type FeishuMessageTaskInput = {
 
 type FeishuQueuedTask = {
   workspaceId: string;
+  action: "task.queued.from_im" | "progress.query.from_im" | "delivery.create.from_im";
 };
+
+type FeishuIntent = "task_start" | "progress_query" | "delivery_create";
 
 type FeishuWsMessageEvent = {
   sender?: {
@@ -209,12 +223,24 @@ type GeneratedSlide = {
   notes: string;
 };
 
+type AgentTask = {
+  title?: string;
+};
+
 type AgentGeneration = {
   provider: "openai" | "fallback";
   summary: string;
   steps: GeneratedAgentStep[];
   documentMarkdown: string;
   slides: GeneratedSlide[];
+};
+
+type DeliveryArtifact = {
+  id: string;
+  docLink: string;
+  deckLink: string;
+  archiveSummary: string;
+  createdAt: string;
 };
 
 type ChatCompletionResponse = {
@@ -235,6 +261,17 @@ type FeishuTenantTokenResponse = {
 type FeishuMessageResponse = {
   code?: number;
   msg?: string;
+};
+
+type FeishuDocxCreateResponse = {
+  code?: number;
+  msg?: string;
+  data?: {
+    document?: {
+      document_id?: string;
+      title?: string;
+    };
+  };
 };
 
 type AgentRoomWriteInput = {
@@ -360,18 +397,47 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
 
 function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask {
   const workspaceId = toFeishuWorkspaceId(input.chatId);
-  writePendingFeishuTaskToRoom(input, workspaceId);
+  const intent = detectFeishuIntent(input.prompt);
+  appendFeishuUserMessageToRoom(input, workspaceId);
+
+  if (intent === "progress_query") {
+    const reply = buildProgressReply(workspaceId);
+    appendAgentMessageToRoom(workspaceId, reply);
+    void sendFeishuText(input.chatId, reply);
+    app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Handled Feishu progress query");
+    return { workspaceId, action: "progress.query.from_im" };
+  }
+
+  if (intent === "delivery_create") {
+    app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Queued Feishu delivery request");
+    void sendFeishuText(input.chatId, `收到，正在生成交付物。\n\nWorkspace: ${workspaceId}`);
+    void runFeishuDeliveryTask(input, workspaceId).catch((error) => {
+      app.log.error({ error, chatId: input.chatId, workspaceId }, "Feishu delivery task failed");
+    });
+    return { workspaceId, action: "delivery.create.from_im" };
+  }
+
+  writePendingFeishuTaskToRoom(input, workspaceId, { appendUserMessage: false });
   app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Queued Feishu IM event");
+
+  void sendFeishuText(input.chatId, `收到，Agent-Pilot 正在生成需求文档和 PPT 大纲。\n\nWorkspace: ${workspaceId}`);
 
   void runFeishuMessageTask(input, workspaceId).catch((error) => {
     app.log.error({ error, chatId: input.chatId, workspaceId }, "Feishu Agent task failed");
   });
 
-  return { workspaceId };
+  return { workspaceId, action: "task.queued.from_im" };
 }
 
 async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: string): Promise<void> {
+  const startedAt = performance.now();
   const generation = await generateAgentPlan(input.prompt, `飞书会话 ${input.chatId} 中的 IM 指令`);
+  const generationMs = Math.round(performance.now() - startedAt);
+  app.log.info(
+    { chatId: input.chatId, workspaceId, provider: generation.provider, generationMs },
+    "Feishu Agent generation completed"
+  );
+
   writeAgentGenerationToRoom({
     workspaceId,
     prompt: input.prompt,
@@ -380,18 +446,35 @@ async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: 
     generation
   });
 
+  const replyStartedAt = performance.now();
   await sendFeishuText(input.chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\nWorkspace: ${workspaceId}`);
+  app.log.info(
+    { chatId: input.chatId, workspaceId, replyMs: Math.round(performance.now() - replyStartedAt) },
+    "Feishu final reply completed"
+  );
 }
 
-function writePendingFeishuTaskToRoom(input: FeishuMessageTaskInput, workspaceId: string): void {
+async function runFeishuDeliveryTask(input: FeishuMessageTaskInput, workspaceId: string): Promise<void> {
+  const delivery = await createDeliveryForWorkspace(workspaceId);
+  writeDeliveryToRoom(workspaceId, delivery);
+  await sendFeishuText(
+    input.chatId,
+    [
+      "交付物已生成：",
+      `飞书文档：${delivery.docLink}`,
+      `PPT/大纲：${delivery.deckLink}`,
+      "",
+      delivery.archiveSummary
+    ].join("\n")
+  );
+}
+
+function appendFeishuUserMessageToRoom(input: FeishuMessageTaskInput, workspaceId: string): void {
   const room = getRoom(workspaceId);
   const now = new Date().toISOString();
-  const taskId = randomUUID();
 
   room.doc.transact(() => {
-    const agentState = room.doc.getMap("agentState");
     const messages = room.doc.getArray<Y.Map<unknown>>("messages");
-
     messages.push([
       objectToYMap({
         id: randomUUID(),
@@ -400,6 +483,31 @@ function writePendingFeishuTaskToRoom(input: FeishuMessageTaskInput, workspaceId
         createdAt: now
       })
     ]);
+  });
+}
+
+function writePendingFeishuTaskToRoom(
+  input: FeishuMessageTaskInput,
+  workspaceId: string,
+  options: { appendUserMessage?: boolean } = {}
+): void {
+  const room = getRoom(workspaceId);
+  const now = new Date().toISOString();
+  const taskId = randomUUID();
+
+  room.doc.transact(() => {
+    const agentState = room.doc.getMap("agentState");
+    if (options.appendUserMessage !== false) {
+      const messages = room.doc.getArray<Y.Map<unknown>>("messages");
+      messages.push([
+        objectToYMap({
+          id: randomUUID(),
+          role: "user",
+          content: input.prompt,
+          createdAt: now
+        })
+      ]);
+    }
 
     agentState.set("task", {
       id: taskId,
@@ -422,6 +530,37 @@ function writePendingFeishuTaskToRoom(input: FeishuMessageTaskInput, workspaceId
       }
     ]);
   });
+}
+
+function detectFeishuIntent(input: string): FeishuIntent {
+  if (/进度|到哪|状态|完成了吗|现在|查一下/.test(input)) return "progress_query";
+  if (/交付|归档|链接|文档链接|生成文档|导出|汇报材料|最终版/.test(input)) return "delivery_create";
+  return "task_start";
+}
+
+function buildProgressReply(workspaceId: string): string {
+  const room = getRoom(workspaceId);
+  const agentState = room.doc.getMap("agentState");
+  const task = (agentState.get("task") as Partial<AgentTask> | null) ?? null;
+  const steps = (agentState.get("steps") as Array<Partial<GeneratedAgentStep> & { status?: string }> | undefined) ?? [];
+  const status = String(agentState.get("status") ?? "idle");
+  const done = steps.filter((step) => step.status === "done").length;
+  const documentLength = room.doc.getText("document").length;
+  const slideCount = room.doc.getArray("slides").length;
+  const delivery = agentState.get("delivery") as DeliveryArtifact | undefined;
+
+  if (!task) {
+    return `当前 workspace「${workspaceId}」还没有运行中的 Agent 任务。`;
+  }
+
+  return [
+    `当前任务：${task.title ?? "未命名任务"}`,
+    `状态：${status}`,
+    `步骤：已完成 ${done}/${steps.length}`,
+    `文档：${documentLength > 0 ? `${documentLength} 字符` : "未生成"}`,
+    `PPT/大纲：${slideCount} 页`,
+    delivery ? `交付：${delivery.docLink}` : "交付：未生成"
+  ].join("\n");
 }
 
 function normalizeGeneration(
@@ -593,6 +732,169 @@ function objectToYMap(value: Record<string, unknown>): Y.Map<unknown> {
     map.set(key, entry);
   }
   return map;
+}
+
+async function createDeliveryForWorkspace(workspaceId: string): Promise<DeliveryArtifact> {
+  const room = getRoom(workspaceId);
+  const agentState = room.doc.getMap("agentState");
+  const task = (agentState.get("task") as Partial<AgentTask> | null) ?? null;
+  const documentMarkdown = room.doc.getText("document").toString();
+  const slides = room.doc.getArray<Y.Map<unknown>>("slides").toArray().map((slide, index) => ({
+    title: String(slide.get("title") ?? `第 ${index + 1} 页`),
+    notes: String(slide.get("notes") ?? "")
+  }));
+  const title = task?.title ? `Agent-Pilot：${task.title}` : `Agent-Pilot 交付物 ${workspaceId}`;
+  const fallbackDocLink = `local://workspace/${encodeURIComponent(workspaceId)}/document`;
+  const fallbackDeckLink = `local://workspace/${encodeURIComponent(workspaceId)}/slides`;
+  let docLink = fallbackDocLink;
+
+  try {
+    const documentId = await createFeishuDocument(title, documentMarkdown, slides);
+    docLink = toFeishuDocLink(documentId);
+  } catch (error) {
+    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Feishu docx delivery failed, using local delivery links");
+  }
+
+  return {
+    id: randomUUID(),
+    docLink,
+    deckLink: fallbackDeckLink,
+    archiveSummary: `已归档「${task?.title ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT 大纲和 Agent 执行摘要。`,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function writeDeliveryToRoom(workspaceId: string, delivery: DeliveryArtifact): void {
+  const room = getRoom(workspaceId);
+  const agentState = room.doc.getMap("agentState");
+  const steps = ((agentState.get("steps") as Array<Record<string, unknown>> | undefined) ?? []).map((step) =>
+    step.type === "delivery" ? { ...step, status: "done", resultRef: delivery.id } : step
+  );
+
+  room.doc.transact(() => {
+    agentState.set("delivery", delivery);
+    agentState.set("steps", steps);
+    agentState.set("status", "done");
+    appendAgentMessageToRoom(
+      workspaceId,
+      `交付完成：已生成飞书文档链接、PPT 大纲链接和归档摘要。\n${delivery.docLink}`
+    );
+  });
+}
+
+function appendAgentMessageToRoom(workspaceId: string, content: string): void {
+  const room = getRoom(workspaceId);
+  const messages = room.doc.getArray<Y.Map<unknown>>("messages");
+  messages.push([
+    objectToYMap({
+      id: randomUUID(),
+      role: "agent",
+      content,
+      createdAt: new Date().toISOString()
+    })
+  ]);
+}
+
+async function createFeishuDocument(
+  title: string,
+  documentMarkdown: string,
+  slides: GeneratedSlide[]
+): Promise<string> {
+  if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
+    throw new Error("FEISHU_APP_ID/FEISHU_APP_SECRET are not configured");
+  }
+
+  const token = await getFeishuTenantAccessToken();
+  const baseUrl = getFeishuBaseUrl();
+  const createResponse = await fetch(`${baseUrl}/open-apis/docx/v1/documents`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      data: {
+        folder_token: process.env.FEISHU_DOC_FOLDER_TOKEN || undefined,
+        title: title.slice(0, 120)
+      }
+    })
+  });
+  const createPayload = (await createResponse.json()) as FeishuDocxCreateResponse;
+  const documentId = createPayload.data?.document?.document_id;
+  if (!createResponse.ok || createPayload.code !== 0 || !documentId) {
+    throw new Error(`Failed to create Feishu docx: ${createResponse.status} ${JSON.stringify(createPayload)}`);
+  }
+
+  await tryAppendFeishuDocBlocks(documentId, token, documentMarkdown, slides);
+  return documentId;
+}
+
+async function tryAppendFeishuDocBlocks(
+  documentId: string,
+  token: string,
+  documentMarkdown: string,
+  slides: GeneratedSlide[]
+): Promise<void> {
+  const lines = [
+    ...documentMarkdown.split(/\r?\n/).filter((line) => line.trim()).slice(0, 30),
+    "",
+    "## PPT 大纲",
+    ...slides.map((slide, index) => `${index + 1}. ${slide.title} - ${slide.notes}`)
+  ].filter((line) => line.trim());
+  if (lines.length === 0) return;
+
+  const children = lines.slice(0, 40).map((line) => ({
+    block_type: line.startsWith("#") ? 3 : 2,
+    text: {
+      elements: [
+        {
+          text_run: {
+            content: line.replace(/^#+\s*/, "")
+          }
+        }
+      ]
+    }
+  }));
+
+  try {
+    const response = await fetch(
+      `${getFeishuBaseUrl()}/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          children
+        })
+      }
+    );
+    const payload = await response.json();
+    if (!response.ok || payload.code !== 0) {
+      app.log.warn({ status: response.status, payload }, "Feishu docx block append failed");
+    }
+  } catch (error) {
+    app.log.warn({ error }, "Feishu docx block append failed");
+  }
+}
+
+function toErrorInfo(error: unknown): { name?: string; message: string; stack?: string } {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+  return {
+    message: String(error)
+  };
+}
+
+function toFeishuDocLink(documentId: string): string {
+  const base = (process.env.FEISHU_DOC_BASE_URL ?? "https://feishu.cn/docx").replace(/\/$/, "");
+  return `${base}/${documentId}`;
 }
 
 async function sendFeishuText(chatId: string, text: string): Promise<void> {

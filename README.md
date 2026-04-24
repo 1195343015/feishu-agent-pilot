@@ -72,6 +72,12 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 - Scene E：移动端和桌面端通过 Yjs 实时同步，离线编辑后重连合并
 - Scene F：生成飞书文档链接、PPT 文件链接和归档摘要
 
+飞书机器人当前支持的自然语言指令：
+
+- 启动任务：`根据刚才讨论生成需求文档和 5 页汇报 PPT`
+- 查询进度：`现在进度到哪了？`
+- 生成交付物：`生成交付物` / `生成文档链接` / `归档一下`
+
 飞书 Adapter MVP：
 
 - `GET http://localhost:8787/api/feishu/capabilities`
@@ -122,6 +128,8 @@ FEISHU_APP_SECRET=xxx
 FEISHU_EVENT_MODE=webhook
 FEISHU_VERIFICATION_TOKEN=xxx
 FEISHU_ENCRYPT_KEY=xxx
+FEISHU_DOC_BASE_URL=https://你的企业域名.feishu.cn/docx
+FEISHU_DOC_FOLDER_TOKEN=可选的云空间文件夹 token
 ```
 
 `FEISHU_ENCRYPT_KEY` 只有在事件订阅开启“加密推送”时必填；建议正式演示时开启。配置后重启后端：
@@ -134,6 +142,8 @@ npm run dev:server
 
 - 接收群聊/单聊消息事件：`im.message.receive_v1`
 - 发送消息：`im:message`
+- 创建新版文档：`docx:document`
+- 编辑新版文档块：`docx:document.block`（可选，用于把内容写入文档正文；未开通时仍会创建文档并返回链接）
 
 4. 在飞书开放平台的“事件订阅”中配置请求地址：
 
@@ -157,6 +167,8 @@ cloudflared tunnel --url http://localhost:8787
 
 后端会把飞书 `chat_id` 映射为 `feishu-{chat_id}` workspace，自动启动 Agent 任务、写入协同文档和 PPT 大纲，并向原飞书会话回发任务启动消息。Web 客户端切换到对应 workspace 后即可看到结果。
 
+当用户在同一飞书会话中发送“现在进度到哪了”时，后端会读取该会话对应 workspace 的任务状态、文档长度、PPT 页数和交付状态并直接回复；发送“生成交付物”时，后端会尝试调用飞书新版文档 OpenAPI 创建真实文档，并把文档链接写回 workspace 和飞书会话。
+
 ### 使用飞书长连接接收事件
 
 飞书也支持“使用长连接接收事件”。该模式更适合本地开发：无需公网域名、无需 Cloudflare Tunnel、无需配置加密策略。项目已接入飞书官方 Node SDK，开启方式如下：
@@ -165,6 +177,7 @@ cloudflared tunnel --url http://localhost:8787
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
 FEISHU_EVENT_MODE=ws
+FEISHU_DOC_BASE_URL=https://你的企业域名.feishu.cn/docx
 ```
 
 然后重启后端：
