@@ -1,6 +1,6 @@
 # Feishu Agent-Pilot
 
-基于 IM 的办公协同智能助手 — 从 IM 对话到演示稿的一键智能闭环。
+基于 IM 的办公协同智能助手，从 IM 对话到演示稿的一键智能闭环。
 
 ## 赛题背景
 
@@ -25,24 +25,59 @@
 
 ## Tech Stack
 
-> 待定
+- React + TypeScript + Vite：桌面 Web 与移动端共用 UI
+- Capacitor：将同一套 Web 应用打包到 iOS / Android
+- Yjs + y-websocket：协同内容实时同步
+- y-indexeddb：端侧离线持久化和重连合并
+- Node.js + Fastify：同步服务与后端服务入口
+- PostgreSQL / Supabase：后续承载任务、消息、权限、交付物等结构化状态
 
 ## 快速开始
 
 ```bash
-# 克隆仓库
-git clone https://github.com/1195343015/feishu-agent-pilot.git
+npm install
+npm run dev
+```
 
-# 进入项目目录
-cd feishu-agent-pilot
+启动后：
 
-# 安装依赖（待补充）
-# 启动服务（待补充）
+- Web 客户端：http://localhost:5173
+- Yjs 同步服务：ws://localhost:8787
+- 健康检查：http://localhost:8787/health
+
+多端协同验证方式：
+
+1. 在两个浏览器窗口打开 http://localhost:5173。
+2. 保持相同 `Workspace`。
+3. 在任一窗口启动 Agent 任务或编辑文档。
+4. 另一窗口会实时看到文档和 PPT 大纲同步。
+
+移动端打包准备：
+
+```bash
+npm run build -w @agent-pilot/web
+npm run mobile:add:android -w @agent-pilot/web
+npm run mobile:sync -w @agent-pilot/web
+```
+
+iOS 同理使用：
+
+```bash
+npm run mobile:add:ios -w @agent-pilot/web
+npm run mobile:sync -w @agent-pilot/web
 ```
 
 ## 项目结构
 
-> 待补充
+```text
+apps/
+  server/        # Fastify + y-websocket 同步服务
+  web/           # React 多端共用客户端，Capacitor 移动端入口
+packages/
+  shared/        # 共享类型、Yjs workspace 建模
+docs/
+  architecture.md
+```
 
 ## License
 

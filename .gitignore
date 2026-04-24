@@ -1,1 +1,8 @@
-timu.md
+node_modules
+docs/
+dist
+.logs
+*.log
+*.tsbuildinfo
+apps/*/dist
+apps/*/.vite

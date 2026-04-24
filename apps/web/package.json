@@ -1,0 +1,34 @@
+{
+  "name": "@agent-pilot/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "typecheck": "tsc -b --noEmit",
+    "mobile:sync": "cap sync",
+    "mobile:add:ios": "cap add ios",
+    "mobile:add:android": "cap add android"
+  },
+  "dependencies": {
+    "@agent-pilot/shared": "*",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.2.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "y-indexeddb": "^9.0.12",
+    "y-websocket": "2.0.4",
+    "yjs": "^13.6.27",
+    "zustand": "^5.0.3",
+    "lucide-react": "^0.468.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.4",
+    "typescript": "^5.8.3"
+  }
+}
