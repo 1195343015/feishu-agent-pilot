@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { randomUUID } from "node:crypto";
+import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import * as decoding from "lib0/decoding";
@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
+import * as Lark from "@larksuiteoapi/node-sdk";
 
 loadDotEnv();
 
@@ -62,17 +63,19 @@ app.get("/api/feishu/capabilities", async () => ({
   supports: [
     "event.challenge",
     "im.message.receive_v1",
+    "event.long_connection",
     "task.start.from_im",
     "yjs.workspace.write",
     "bot.message.reply.optional",
+    "encrypted_callback.optional",
     "delivery.link.placeholder"
   ],
   requiredEnvForRealOpenApi: ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
-  optionalEnv: ["FEISHU_VERIFICATION_TOKEN", "FEISHU_OPEN_BASE_URL"]
+  optionalEnv: ["FEISHU_EVENT_MODE", "FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY", "FEISHU_OPEN_BASE_URL"]
 }));
 
 app.post("/api/feishu/events", async (request, reply) => {
-  const body = request.body as FeishuEventPayload | undefined;
+  const body = unwrapFeishuPayload(request.body as FeishuEventPayload | undefined);
 
   if (body?.challenge) {
     return { challenge: body.challenge };
@@ -101,28 +104,21 @@ app.post("/api/feishu/events", async (request, reply) => {
       };
     }
 
-    const workspaceId = toFeishuWorkspaceId(chatId);
-    app.log.info({ chatId, workspaceId, text }, "Received Feishu IM event");
-
-    const generation = await generateAgentPlan(text, `飞书会话 ${chatId} 中的 IM 指令`);
-    writeAgentGenerationToRoom({
-      workspaceId,
+    const queued = queueFeishuMessageTask({
+      chatId,
       prompt: text,
       senderId,
       sourceMessageId: messageId,
-      generation
+      source: "webhook"
     });
-
-    await sendFeishuText(chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\nWorkspace: ${workspaceId}`);
 
     return {
       ok: true,
-      action: "task.start.from_im",
+      action: "task.queued.from_im",
       chatId,
-      workspaceId,
+      workspaceId: queued.workspaceId,
       prompt: text,
-      provider: generation.provider,
-      note: "Feishu IM event has started an Agent task and written the result into the mapped Yjs workspace."
+      note: "Feishu IM event has been accepted. Agent task generation will continue in the background."
     };
   }
 
@@ -135,6 +131,8 @@ app.post("/api/feishu/events", async (request, reply) => {
 
 const server = await app.listen({ host, port });
 const wss = new WebSocketServer({ noServer: true });
+let feishuWsClient: Lark.WSClient | null = null;
+startFeishuLongConnectionIfEnabled();
 
 app.server.on("upgrade", (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
@@ -148,8 +146,11 @@ app.log.info(`Yjs sync endpoint ready at ws://localhost:${port}/:workspaceId`);
 
 type FeishuEventPayload = {
   challenge?: string;
+  encrypt?: string;
+  type?: string;
   header?: {
     event_type?: string;
+    token?: string;
   };
   event?: {
     sender?: {
@@ -165,6 +166,32 @@ type FeishuEventPayload = {
     };
   };
   token?: string;
+};
+
+type FeishuMessageTaskInput = {
+  chatId: string;
+  prompt: string;
+  senderId: string;
+  sourceMessageId?: string;
+  source: "webhook" | "long_connection";
+};
+
+type FeishuQueuedTask = {
+  workspaceId: string;
+};
+
+type FeishuWsMessageEvent = {
+  sender?: {
+    sender_id?: {
+      user_id?: string;
+      open_id?: string;
+    };
+  };
+  message?: {
+    message_id?: string;
+    chat_id?: string;
+    content?: string;
+  };
 };
 
 type AgentGenerateRequest = {
@@ -331,6 +358,72 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
   };
 }
 
+function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask {
+  const workspaceId = toFeishuWorkspaceId(input.chatId);
+  writePendingFeishuTaskToRoom(input, workspaceId);
+  app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Queued Feishu IM event");
+
+  void runFeishuMessageTask(input, workspaceId).catch((error) => {
+    app.log.error({ error, chatId: input.chatId, workspaceId }, "Feishu Agent task failed");
+  });
+
+  return { workspaceId };
+}
+
+async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: string): Promise<void> {
+  const generation = await generateAgentPlan(input.prompt, `飞书会话 ${input.chatId} 中的 IM 指令`);
+  writeAgentGenerationToRoom({
+    workspaceId,
+    prompt: input.prompt,
+    senderId: input.senderId,
+    sourceMessageId: input.sourceMessageId,
+    generation
+  });
+
+  await sendFeishuText(input.chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\nWorkspace: ${workspaceId}`);
+}
+
+function writePendingFeishuTaskToRoom(input: FeishuMessageTaskInput, workspaceId: string): void {
+  const room = getRoom(workspaceId);
+  const now = new Date().toISOString();
+  const taskId = randomUUID();
+
+  room.doc.transact(() => {
+    const agentState = room.doc.getMap("agentState");
+    const messages = room.doc.getArray<Y.Map<unknown>>("messages");
+
+    messages.push([
+      objectToYMap({
+        id: randomUUID(),
+        role: "user",
+        content: input.prompt,
+        createdAt: now
+      })
+    ]);
+
+    agentState.set("task", {
+      id: taskId,
+      workspaceId,
+      sourceMessageId: input.sourceMessageId,
+      status: "running",
+      title: input.prompt,
+      createdBy: input.senderId,
+      createdAt: now,
+      updatedAt: now
+    });
+    agentState.set("status", "running");
+    agentState.set("steps", [
+      {
+        id: randomUUID(),
+        taskId,
+        type: "plan",
+        status: "running",
+        summary: "已收到飞书消息，正在生成任务计划、需求文档和 PPT 大纲"
+      }
+    ]);
+  });
+}
+
 function normalizeGeneration(
   value: Partial<AgentGeneration>,
   provider: AgentGeneration["provider"],
@@ -390,7 +483,34 @@ function extractFeishuText(message: FeishuMessageEvent | undefined): string {
 function isValidFeishuToken(body: FeishuEventPayload | undefined): boolean {
   const expected = process.env.FEISHU_VERIFICATION_TOKEN;
   if (!expected) return true;
-  return body?.token === expected || body?.header?.event_type !== undefined;
+  return body?.token === expected || body?.header?.token === expected;
+}
+
+function unwrapFeishuPayload(body: FeishuEventPayload | undefined): FeishuEventPayload | undefined {
+  if (!body?.encrypt) return body;
+
+  const encryptKey = process.env.FEISHU_ENCRYPT_KEY;
+  if (!encryptKey) {
+    app.log.warn("Received encrypted Feishu callback but FEISHU_ENCRYPT_KEY is not configured");
+    return body;
+  }
+
+  try {
+    const decrypted = decryptFeishuPayload(body.encrypt, encryptKey);
+    return JSON.parse(decrypted) as FeishuEventPayload;
+  } catch (error) {
+    app.log.warn({ error }, "Failed to decrypt Feishu callback payload");
+    return body;
+  }
+}
+
+function decryptFeishuPayload(encryptedPayload: string, encryptKey: string): string {
+  const encryptedBuffer = Buffer.from(encryptedPayload, "base64");
+  const key = createHash("sha256").update(encryptKey).digest();
+  const iv = encryptedBuffer.subarray(0, 16);
+  const encrypted = encryptedBuffer.subarray(16);
+  const decipher = createDecipheriv("aes-256-cbc", key, iv);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
 }
 
 function toFeishuWorkspaceId(chatId: string): string {
@@ -503,6 +623,55 @@ async function sendFeishuText(chatId: string, text: string): Promise<void> {
   } catch (error) {
     app.log.warn({ error }, "Feishu bot reply failed");
   }
+}
+
+function startFeishuLongConnectionIfEnabled(): void {
+  const mode = process.env.FEISHU_EVENT_MODE?.toLowerCase();
+  if (mode !== "ws" && mode !== "long_connection" && mode !== "both") {
+    return;
+  }
+
+  const appId = process.env.FEISHU_APP_ID;
+  const appSecret = process.env.FEISHU_APP_SECRET;
+  if (!appId || !appSecret) {
+    app.log.warn("FEISHU_EVENT_MODE enables long connection, but FEISHU_APP_ID/FEISHU_APP_SECRET are missing");
+    return;
+  }
+
+  const eventDispatcher = new Lark.EventDispatcher({
+    loggerLevel: Lark.LoggerLevel.info
+  }).register({
+    "im.message.receive_v1": async (data: FeishuWsMessageEvent) => {
+      const message = data.message;
+      const chatId = message?.chat_id;
+      const text = extractFeishuText(message);
+      const senderId = data.sender?.sender_id?.user_id ?? data.sender?.sender_id?.open_id ?? "feishu-user";
+      if (!chatId || !text) {
+        app.log.warn({ data }, "Ignoring Feishu long-connection event without chat_id or text");
+        return;
+      }
+
+      queueFeishuMessageTask({
+        chatId,
+        prompt: text,
+        senderId,
+        sourceMessageId: message?.message_id,
+        source: "long_connection"
+      });
+    }
+  });
+
+  feishuWsClient = new Lark.WSClient({
+    appId,
+    appSecret,
+    loggerLevel: Lark.LoggerLevel.info
+  });
+
+  void feishuWsClient.start({ eventDispatcher }).catch((error) => {
+    app.log.error({ error }, "Feishu long connection stopped with error");
+  });
+
+  app.log.info("Feishu long connection client is starting");
 }
 
 async function getFeishuTenantAccessToken(): Promise<string> {

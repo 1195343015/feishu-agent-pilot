@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@agent-pilot/shared": "*",
+    "@larksuiteoapi/node-sdk": "^1.36.0",
     "fastify": "^4.29.0",
     "lib0": "^0.2.102",
     "ws": "^8.18.1",

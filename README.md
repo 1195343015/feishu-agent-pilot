@@ -111,6 +111,72 @@ feishu-oc_demo
 
 即可看到由飞书事件触发的 Agent 任务、文档和 PPT 大纲。
 
+### 飞书机器人正式接入
+
+1. 在飞书开放平台创建企业自建应用，并开启机器人能力。
+2. 在 `.env` 中配置：
+
+```bash
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_EVENT_MODE=webhook
+FEISHU_VERIFICATION_TOKEN=xxx
+FEISHU_ENCRYPT_KEY=xxx
+```
+
+`FEISHU_ENCRYPT_KEY` 只有在事件订阅开启“加密推送”时必填；建议正式演示时开启。配置后重启后端：
+
+```bash
+npm run dev:server
+```
+
+3. 给应用申请并发布至少以下权限：
+
+- 接收群聊/单聊消息事件：`im.message.receive_v1`
+- 发送消息：`im:message`
+
+4. 在飞书开放平台的“事件订阅”中配置请求地址：
+
+```text
+https://你的公网域名/api/feishu/events
+```
+
+本地演示可使用 Cloudflare Tunnel 暴露 8787：
+
+```bash
+cloudflared tunnel --url http://localhost:8787
+```
+
+然后把生成的 `https://xxx.trycloudflare.com/api/feishu/events` 填到飞书事件订阅里。
+
+5. 订阅事件 `im.message.receive_v1`，保存并发布应用版本。把机器人拉入单聊或群聊后，发送自然语言指令，例如：
+
+```text
+根据刚才讨论生成需求文档和 5 页汇报 PPT
+```
+
+后端会把飞书 `chat_id` 映射为 `feishu-{chat_id}` workspace，自动启动 Agent 任务、写入协同文档和 PPT 大纲，并向原飞书会话回发任务启动消息。Web 客户端切换到对应 workspace 后即可看到结果。
+
+### 使用飞书长连接接收事件
+
+飞书也支持“使用长连接接收事件”。该模式更适合本地开发：无需公网域名、无需 Cloudflare Tunnel、无需配置加密策略。项目已接入飞书官方 Node SDK，开启方式如下：
+
+```bash
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+FEISHU_EVENT_MODE=ws
+```
+
+然后重启后端：
+
+```bash
+npm run dev:server
+```
+
+在飞书开发者后台进入“事件与回调”或“事件订阅”，选择“使用长连接接收事件”，保持本地后端运行，然后点击“验证连接状态”。验证通过后订阅 `im.message.receive_v1` 并发布应用版本。
+
+长连接模式下不需要填写 `FEISHU_VERIFICATION_TOKEN` 和 `FEISHU_ENCRYPT_KEY`；这两个变量只用于 Webhook 回调模式。机器人回发消息仍然需要 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`。
+
 ## 飞书 CLI 辅助开发
 
 本项目运行时不依赖 `lark-cli`，运行时仍由 `apps/server` 的 Feishu Adapter 负责接收事件和调用 OpenAPI。`lark-cli` 用作开发和调试工具，适合完成应用初始化、OAuth 登录、权限检查、接口 dry-run 和 schema 查询。
