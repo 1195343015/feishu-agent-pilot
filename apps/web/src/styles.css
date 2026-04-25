@@ -212,6 +212,32 @@ textarea:focus {
   color: #243047;
 }
 
+.icon-button.recording {
+  background: #ffebee;
+  border-color: #ef9a9a;
+  color: #c62828;
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(198, 40, 40, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(198, 40, 40, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(198, 40, 40, 0);
+  }
+}
+
+.input-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
 .panel-actions,
 .tool-row {
   display: flex;

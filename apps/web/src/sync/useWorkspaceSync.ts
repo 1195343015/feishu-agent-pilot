@@ -171,6 +171,13 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     const prompt = content.trim();
     workspace.messages.push([chatMessageToYMap(createChatMessage({ role: "user", content: prompt }))]);
 
+    // 主动任务澄清：指令太模糊时主动询问
+    if (isVagueQuery(prompt)) {
+      const response = "我不太理解你的具体需求，可以详细说明一下吗？比如：\n1. 生成需求文档和5页汇报PPT\n2. 查询当前任务进度\n3. 生成交付物链接\n我会根据你的具体需求执行相应操作。";
+      workspace.messages.push([chatMessageToYMap(createChatMessage({ role: "agent", content: response }))]);
+      return;
+    }
+
     if (isProgressQuery(prompt)) {
       const task = (workspace.agentState.get("task") as AgentTask | null) ?? null;
       const steps = (workspace.agentState.get("steps") as AgentStep[] | undefined) ?? [];
@@ -284,27 +291,57 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     ]);
   },
 
-  createDelivery() {
+  async createDelivery() {
     const doc = get().doc;
     if (!doc) return;
 
     const workspace = getSharedWorkspace(doc);
     const task = (workspace.agentState.get("task") as AgentTask | null) ?? null;
-    const delivery = createDeliveryArtifact({
-      workspaceId: get().workspaceId,
-      taskTitle: task?.title ?? "Agent-Pilot 汇报",
-      slideCount: workspace.slides.length
-    });
-    const steps = ((workspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
-      step.type === "delivery" ? { ...step, status: "done" as const, resultRef: delivery.id } : step
-    );
-
-    workspace.agentState.set("delivery", delivery);
-    workspace.agentState.set("steps", steps);
-    workspace.agentState.set("status", "done");
+    
     workspace.messages.push([
-      chatMessageToYMap(createChatMessage({ role: "agent", content: "交付完成：已生成飞书文档链接、PPT 文件链接和归档摘要。" }))
+      chatMessageToYMap(createChatMessage({ role: "agent", content: "正在生成交付物，请稍候..." }))
     ]);
+
+    try {
+      const response = await fetch(`${toHttpBaseUrl(get().syncUrl)}/api/feishu/delivery?workspaceId=${encodeURIComponent(get().workspaceId)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error("交付物生成失败");
+      }
+
+      const delivery = (await response.json()) as DeliveryArtifact;
+      const steps = ((workspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
+        step.type === "delivery" ? { ...step, status: "done" as const, resultRef: delivery.id } : step
+      );
+
+      workspace.agentState.set("delivery", delivery);
+      workspace.agentState.set("steps", steps);
+      workspace.agentState.set("status", "done");
+      workspace.messages.push([
+        chatMessageToYMap(createChatMessage({ role: "agent", content: "交付完成：已生成飞书文档链接、PPT 文件链接和归档摘要。" }))
+      ]);
+    } catch (error) {
+      const fallbackDelivery = createDeliveryArtifact({
+        workspaceId: get().workspaceId,
+        taskTitle: task?.title ?? "Agent-Pilot 汇报",
+        slideCount: workspace.slides.length
+      });
+      const steps = ((workspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
+        step.type === "delivery" ? { ...step, status: "done" as const, resultRef: fallbackDelivery.id } : step
+      );
+
+      workspace.agentState.set("delivery", fallbackDelivery);
+      workspace.agentState.set("steps", steps);
+      workspace.agentState.set("status", "done");
+      workspace.messages.push([
+        chatMessageToYMap(createChatMessage({ role: "agent", content: "交付完成：已生成本地预览链接。配置飞书权限后可生成正式飞书链接。" }))
+      ]);
+    }
   },
 
   insertRichBlock(kind) {
@@ -350,6 +387,16 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
 
 function isProgressQuery(input: string): boolean {
   return /进度|到哪|状态|完成了吗|现在/.test(input);
+}
+
+function isVagueQuery(input: string): boolean {
+  const vaguePatterns = [
+    /^(.{0,5}|[^\u4e00-\u9fa5a-zA-Z0-9]+)$/, // 太短或只有特殊字符
+    /^(你好|hi|hello|在吗|哈喽|测试|啥|什么|怎么|为什么|哦|嗯|啊|好的|收到)$/i, // 问候或无意义词
+    /^(帮我|给我|要|做|弄|搞)$/ // 只有动词没有具体内容
+  ];
+  const trimmed = input.trim().toLowerCase();
+  return vaguePatterns.some(pattern => pattern.test(trimmed)) && trimmed.length < 6;
 }
 
 async function requestAgentGeneration(syncUrl: string, prompt: string, context: string): Promise<AgentGeneration> {

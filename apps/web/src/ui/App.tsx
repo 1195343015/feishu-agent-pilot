@@ -16,6 +16,13 @@ import {
 import { useEffect, useState } from "react";
 import { useWorkspaceSync } from "../sync/useWorkspaceSync";
 
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
+
 export function App() {
   const {
     workspaceId,
@@ -42,6 +49,49 @@ export function App() {
   } = useWorkspaceSync();
 
   const [prompt, setPrompt] = useState("根据这段讨论生成需求文档和 5 页汇报 PPT");
+  const [isRecording, setIsRecording] = useState(false);
+  const [recognition, setRecognition] = useState<any | null>(null);
+
+  useEffect(() => {
+    if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const rec = new SpeechRecognition();
+      rec.lang = 'zh-CN';
+      rec.continuous = false;
+      rec.interimResults = false;
+
+      rec.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setPrompt(transcript);
+        setIsRecording(false);
+      };
+
+      rec.onerror = () => {
+        setIsRecording(false);
+      };
+
+      rec.onend = () => {
+        setIsRecording(false);
+      };
+
+      setRecognition(rec);
+    }
+
+    return () => {
+      recognition?.abort();
+    };
+  }, []);
+
+  const toggleRecording = () => {
+    if (!recognition) return;
+
+    if (isRecording) {
+      recognition.stop();
+    } else {
+      setIsRecording(true);
+      recognition.start();
+    }
+  };
 
   useEffect(() => {
     connect();
@@ -107,12 +157,22 @@ export function App() {
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="@Agent-Pilot 输入自然语言任务"
+            placeholder="@Agent-Pilot 输入自然语言任务，或点击麦克风按钮语音输入"
           />
-          <button className="primary-button" onClick={() => sendMessage(prompt)}>
-            <Play size={18} />
-            发送指令
-          </button>
+          <div className="input-actions">
+            <button 
+              className={`icon-button ${isRecording ? "recording" : ""}`} 
+              onClick={toggleRecording}
+              disabled={!recognition}
+              title={recognition ? "语音输入" : "浏览器不支持语音输入"}
+            >
+              <Mic size={18} />
+            </button>
+            <button className="primary-button" onClick={() => sendMessage(prompt)}>
+              <Play size={18} />
+              发送指令
+            </button>
+          </div>
           <div className="task-card">
             <div className="task-icon">{task ? <CheckCircle2 size={20} /> : <CircleOff size={20} />}</div>
             <div>

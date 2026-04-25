@@ -86,6 +86,24 @@ app.get("/api/feishu/capabilities", async () => ({
   ]
 }));
 
+app.post("/api/feishu/delivery", async (request, reply) => {
+  const workspaceId = (request.query as { workspaceId?: string })?.workspaceId;
+  if (!workspaceId) {
+    reply.code(400);
+    return { ok: false, error: "missing workspaceId" };
+  }
+
+  try {
+    const delivery = await createDeliveryForWorkspace(workspaceId);
+    writeDeliveryToRoom(workspaceId, delivery);
+    return delivery;
+  } catch (error) {
+    app.log.error({ error: toErrorInfo(error), workspaceId }, "Failed to create delivery via API");
+    reply.code(500);
+    return { ok: false, error: "delivery failed" };
+  }
+});
+
 app.post("/api/feishu/events", async (request, reply) => {
   const body = unwrapFeishuPayload(request.body as FeishuEventPayload | undefined);
 
