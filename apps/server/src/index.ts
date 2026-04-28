@@ -1141,7 +1141,7 @@ async function uploadFileToFeishuDrive(
   form.append("file_name", fileName);
   form.append("parent_type", "explorer");
   form.append("size", fileBuffer.length.toString());
-  form.append("file", new Blob([fileBuffer], {
+  form.append("file", new Blob([new Uint8Array(fileBuffer)], {
     type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
   }), fileName);
 
