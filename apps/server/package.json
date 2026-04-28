@@ -13,6 +13,7 @@
     "@larksuiteoapi/node-sdk": "^1.62.0",
     "fastify": "^4.29.0",
     "lib0": "^0.2.102",
+    "pptxgenjs": "^4.0.1",
     "ws": "^8.18.1",
     "y-protocols": "^1.0.6",
     "y-websocket": "^3.0.0",

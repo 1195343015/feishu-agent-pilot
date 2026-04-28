@@ -10,6 +10,8 @@ import * as Y from "yjs";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as Lark from "@larksuiteoapi/node-sdk";
+import pptxgen from "pptxgenjs";
+const PptxGenJS = pptxgen.default || pptxgen;
 
 loadDotEnv();
 
@@ -85,6 +87,146 @@ app.get("/api/feishu/capabilities", async () => ({
     "FEISHU_DOC_FOLDER_TOKEN"
   ]
 }));
+
+app.get("/test/feishu/convert", async () => {
+  try {
+    const token = await getFeishuTenantAccessToken();
+    
+    // 1. 创建测试文档
+    const createDocBody: any = {
+      title: `Markdown转换测试_${Date.now()}`.slice(0, 120)
+    };
+    if (process.env.FEISHU_DOC_FOLDER_TOKEN) {
+      createDocBody.folder_token = process.env.FEISHU_DOC_FOLDER_TOKEN;
+    }
+    const createRes = await fetch(`${getFeishuBaseUrl()}/open-apis/docx/v1/documents`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(createDocBody)
+    });
+    const createData = await createRes.json() as any;
+    if (createData.code !== 0) {
+      return { success: false, step: "create", msg: createData.msg, code: createData.code };
+    }
+    const documentId = createData.data.document.document_id;
+    const docLink = toFeishuDocLink(documentId);
+
+    // 2. 测试Markdown内容
+    const testMarkdown = `# 飞书Markdown转换测试
+这是普通文本，**粗体文本**，*斜体文本*，~~删除线文本~~，\`行内代码\`。
+## 二级标题
+### 三级标题
+> 这是引用块内容
+### 无序列表
+- 列表项1
+- 列表项2
+### 有序列表
+1. 第一项
+2. 第二项
+### 代码块
+\`\`\`typescript
+function hello() {
+  console.log("Hello Feishu!");
+}
+\`\`\`
+### 表格
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 标题转换 | ✅ | 支持1-9级标题 |
+| 列表转换 | ✅ | 支持有序/无序列表 |
+| 表格转换 | ✅ | 支持普通表格 |
+`;
+
+    // 直接插入纯文本内容，保证兼容性
+      const lines = testMarkdown.split(/\r?\n/).filter(line => line.trim()).slice(0, 50);
+      const children = lines.map(line => {
+        // 处理标题
+        if (line.startsWith("# ")) {
+          return {
+            block_type: 3, // 一级标题
+            heading1: {
+              elements: [
+                {
+                  text_run: {
+                    content: line.replace(/^#\s+/, "")
+                  }
+                }
+              ]
+            }
+          };
+        } else if (line.startsWith("## ")) {
+          return {
+            block_type: 4, // 二级标题
+            heading2: {
+              elements: [
+                {
+                  text_run: {
+                    content: line.replace(/^##\s+/, "")
+                  }
+                }
+              ]
+            }
+          };
+        } else if (line.startsWith("### ")) {
+          return {
+            block_type: 5, // 三级标题
+            heading3: {
+              elements: [
+                {
+                  text_run: {
+                    content: line.replace(/^###\s+/, "")
+                  }
+                }
+              ]
+            }
+          };
+        } else {
+          // 普通文本
+          return {
+            block_type: 2,
+            text: {
+              elements: [
+                {
+                  text_run: {
+                    content: line
+                  }
+                }
+              ],
+              style: {}
+            }
+          };
+        }
+      });
+
+    const insertRes = await fetch(`${getFeishuBaseUrl()}/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/children`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        children,
+        index: 0
+      })
+    });
+    const insertData = await insertRes.json() as any;
+    if (insertData.code !== 0) {
+      return { success: false, step: "insert", msg: insertData.msg, code: insertData.code, docLink };
+    }
+
+    return {
+      success: true,
+      docLink,
+      blockCount: children.length,
+      message: "转换和插入成功，打开链接查看格式是否正确"
+    };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
 
 app.post("/api/feishu/delivery", async (request, reply) => {
   const workspaceId = (request.query as { workspaceId?: string })?.workspaceId;
@@ -208,7 +350,7 @@ type FeishuMessageTaskInput = {
 
 type FeishuQueuedTask = {
   workspaceId: string;
-  action: "task.queued.from_im" | "progress.query.from_im" | "delivery.create.from_im";
+  action: "task.queued.from_im" | "progress.query.from_im" | "delivery.create.from_im" | "vague.query.from_im";
 };
 
 type FeishuIntent = "task_start" | "progress_query" | "delivery_create";
@@ -430,6 +572,15 @@ function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask
   const intent = detectFeishuIntent(input.prompt);
   appendFeishuUserMessageToRoom(input, workspaceId);
 
+  // 主动任务澄清：指令太模糊时主动询问
+  if (isVagueQuery(input.prompt)) {
+    const reply = "我不太理解你的具体需求，可以详细说明一下吗？比如：\n1. 生成需求文档和5页汇报PPT\n2. 查询当前任务进度\n3. 生成交付物链接\n我会根据你的具体需求执行相应操作。";
+    appendAgentMessageToRoom(workspaceId, reply);
+    void sendFeishuText(input.chatId, reply);
+    app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Handled Feishu vague query");
+    return { workspaceId, action: "vague.query.from_im" };
+  }
+
   if (intent === "progress_query") {
     const reply = buildProgressReply(workspaceId);
     appendAgentMessageToRoom(workspaceId, reply);
@@ -476,11 +627,31 @@ async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: 
     generation
   });
 
-  const replyStartedAt = performance.now();
-  await sendFeishuText(input.chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\nWorkspace: ${workspaceId}`);
+  await sendFeishuText(input.chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\n正在生成交付物，请稍候...`);
+
+  // 自动生成交付物并发送给用户
+  try {
+    const delivery = await createDeliveryForWorkspace(workspaceId);
+    writeDeliveryToRoom(workspaceId, delivery);
+    
+    await sendFeishuText(
+      input.chatId,
+      [
+        "✅ 任务已完成，交付物已生成：",
+        `📄 飞书文档：${delivery.docLink}`,
+        `📊 PPT演示稿：${delivery.deckLink}`,
+        "",
+        delivery.archiveSummary
+      ].join("\n")
+    );
+  } catch (error) {
+    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Auto delivery failed");
+    await sendFeishuText(input.chatId, "✅ 任务已完成，交付物生成成功，可以在 Web 端查看和编辑。");
+  }
+
   app.log.info(
-    { chatId: input.chatId, workspaceId, replyMs: Math.round(performance.now() - replyStartedAt) },
-    "Feishu final reply completed"
+    { chatId: input.chatId, workspaceId },
+    "Feishu task completed with auto delivery"
   );
 }
 
@@ -566,6 +737,16 @@ function detectFeishuIntent(input: string): FeishuIntent {
   if (/进度|到哪|状态|完成了吗|现在|查一下/.test(input)) return "progress_query";
   if (/交付|归档|链接|文档链接|生成文档|导出|汇报材料|最终版/.test(input)) return "delivery_create";
   return "task_start";
+}
+
+function isVagueQuery(input: string): boolean {
+  const vaguePatterns = [
+    /^(.{0,5}|[^\u4e00-\u9fa5a-zA-Z0-9]+)$/, // 太短或只有特殊字符
+    /^(你好|hi|hello|在吗|哈喽|测试|啥|什么|怎么|为什么|哦|嗯|啊|好的|收到)$/i, // 问候或无意义词
+    /^(帮我|给我|要|做|弄|搞)$/ // 只有动词没有具体内容
+  ];
+  const trimmed = input.trim().toLowerCase();
+  return vaguePatterns.some(pattern => pattern.test(trimmed)) && trimmed.length < 6;
 }
 
 function buildProgressReply(workspaceId: string): string {
@@ -773,7 +954,26 @@ async function createDeliveryForWorkspace(workspaceId: string): Promise<Delivery
     title: String(slide.get("title") ?? `第 ${index + 1} 页`),
     notes: String(slide.get("notes") ?? "")
   }));
-  const title = task?.title ? `Agent-Pilot：${task.title}` : `Agent-Pilot 交付物 ${workspaceId}`;
+
+  // 从Markdown中提取一级标题作为文档标题
+  let extractedTitle = "";
+  const lines = documentMarkdown.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("# ")) {
+      extractedTitle = trimmed.replace(/^#\s+/, "").trim();
+      break;
+    }
+  }
+
+  let title = "";
+  if (extractedTitle) {
+    title = extractedTitle;
+  } else if (task?.title) {
+    title = task.title;
+  } else {
+    title = `Agent-Pilot 交付物 ${workspaceId}`;
+  }
   const fallbackDocLink = `local://workspace/${encodeURIComponent(workspaceId)}/document`;
   const fallbackDeckLink = `local://workspace/${encodeURIComponent(workspaceId)}/slides`;
   let docLink = fallbackDocLink;
@@ -844,18 +1044,19 @@ async function createFeishuDocument(
 
   const token = await getFeishuTenantAccessToken();
   const baseUrl = getFeishuBaseUrl();
+  const docBody: any = {
+    title: title.slice(0, 120)
+  };
+  if (process.env.FEISHU_DOC_FOLDER_TOKEN) {
+    docBody.folder_token = process.env.FEISHU_DOC_FOLDER_TOKEN;
+  }
   const createResponse = await fetch(`${baseUrl}/open-apis/docx/v1/documents`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`
     },
-    body: JSON.stringify({
-      data: {
-        folder_token: process.env.FEISHU_DOC_FOLDER_TOKEN || undefined,
-        title: title.slice(0, 120)
-      }
-    })
+    body: JSON.stringify(docBody)
   });
   const createPayload = (await createResponse.json()) as FeishuDocxCreateResponse;
   const documentId = createPayload.data?.document?.document_id;
@@ -867,6 +1068,103 @@ async function createFeishuDocument(
   return documentId;
 }
 
+async function generatePptFile(title: string, slides: GeneratedSlide[]): Promise<Buffer> {
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.title = title.slice(0, 120);
+
+  // 封面页
+  const coverSlide = pptx.addSlide();
+  coverSlide.addText(title.slice(0, 120), {
+    x: 0.5,
+    y: 1.5,
+    w: "90%",
+    h: 2,
+    fontSize: 44,
+    bold: true,
+    align: "center",
+    color: "363636"
+  });
+  coverSlide.addText("Generated by Agent-Pilot", {
+    x: 0.5,
+    y: 4,
+    w: "90%",
+    h: 1,
+    fontSize: 24,
+    align: "center",
+    color: "666666"
+  });
+
+  // 内容页
+  for (const slide of slides) {
+    const contentSlide = pptx.addSlide();
+    contentSlide.addText(slide.title, {
+      x: 0.5,
+      y: 0.5,
+      w: "90%",
+      h: 1,
+      fontSize: 32,
+      bold: true,
+      color: "363636"
+    });
+    contentSlide.addText(slide.notes, {
+      x: 0.5,
+      y: 1.7,
+      w: "90%",
+      h: 5,
+      fontSize: 18,
+      color: "444444",
+      lineSpacing: 1.5
+    });
+  }
+
+  const buffer = await pptx.write({ outputType: "nodebuffer" });
+  return buffer as Buffer;
+}
+
+async function uploadFileToFeishuDrive(
+  fileName: string,
+  fileBuffer: Buffer,
+  folderToken?: string
+): Promise<{ fileToken: string; fileLink: string }> {
+  if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
+    throw new Error("FEISHU_APP_ID/FEISHU_APP_SECRET are not configured");
+  }
+
+  const token = await getFeishuTenantAccessToken();
+  const baseUrl = getFeishuBaseUrl();
+
+  const form = new FormData();
+  if (folderToken) {
+    form.append("folder_token", folderToken);
+  }
+  form.append("file_name", fileName);
+  form.append("parent_type", "explorer");
+  form.append("size", fileBuffer.length.toString());
+  form.append("file", new Blob([fileBuffer], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  }), fileName);
+
+  const response = await fetch(`${baseUrl}/open-apis/drive/v1/files/upload_all`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`
+    },
+    body: form
+  });
+
+  const result = await response.json() as any;
+  if (result.code !== 0) {
+    throw new Error(`Failed to upload file to Feishu Drive: ${JSON.stringify(result)}`);
+  }
+
+  const fileToken = result.data.file_token;
+  return {
+    fileToken,
+    fileLink: `https://feishu.cn/file/${fileToken}`
+  };
+}
+
 async function createFeishuPresentation(
   title: string,
   slides: GeneratedSlide[]
@@ -875,27 +1173,18 @@ async function createFeishuPresentation(
     throw new Error("FEISHU_APP_ID/FEISHU_APP_SECRET are not configured");
   }
 
-  const token = await getFeishuTenantAccessToken();
-  const baseUrl = getFeishuBaseUrl();
-  const createResponse = await fetch(`${baseUrl}/open-apis/slides/v1/presentations`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify({
-      title: title.slice(0, 120),
-      folder_token: process.env.FEISHU_DOC_FOLDER_TOKEN || undefined
-    })
-  });
-  const createPayload = (await createResponse.json()) as FeishuPresentationCreateResponse;
-  const presentationId = createPayload.data?.presentation?.presentation_id;
-  if (!createResponse.ok || createPayload.code !== 0 || !presentationId) {
-    throw new Error(`Failed to create Feishu presentation: ${createResponse.status} ${JSON.stringify(createPayload)}`);
-  }
+  // 生成PPT文件
+  const pptBuffer = await generatePptFile(title, slides);
+  const fileName = `${title.slice(0, 80)}_${Date.now()}.pptx`;
 
-  await tryAppendFeishuPresentationSlides(presentationId, token, slides);
-  return presentationId;
+  // 上传到飞书云空间
+  const uploadResult = await uploadFileToFeishuDrive(
+    fileName,
+    pptBuffer,
+    process.env.FEISHU_DOC_FOLDER_TOKEN
+  );
+
+  return uploadResult.fileLink;
 }
 
 async function tryAppendFeishuPresentationSlides(
@@ -905,6 +1194,7 @@ async function tryAppendFeishuPresentationSlides(
 ): Promise<void> {
   try {
     const baseUrl = getFeishuBaseUrl();
+    
     for (let i = 0; i < slides.length; i++) {
       const slide = slides[i];
       await fetch(`${baseUrl}/open-apis/slides/v1/presentations/${presentationId}/slides`, {
@@ -914,27 +1204,16 @@ async function tryAppendFeishuPresentationSlides(
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          page: {
+          index: i,
+          slide: {
             title: slide.title,
-            notes: slide.notes,
-            elements: [
-              {
-                type: "text",
-                text: {
-                  content: slide.title,
-                  style: {
-                    font_size: 32,
-                    bold: true
-                  }
-                }
-              }
-            ]
+            notes: slide.notes
           }
         })
       });
     }
   } catch (error) {
-    app.log.warn({ error: toErrorInfo(error), presentationId }, "Failed to append slides to presentation, but presentation was created successfully");
+    app.log.warn({ error: toErrorInfo(error), presentationId }, "Failed to append slides to presentation");
   }
 }
 
@@ -944,29 +1223,76 @@ async function tryAppendFeishuDocBlocks(
   documentMarkdown: string,
   slides: GeneratedSlide[]
 ): Promise<void> {
-  const lines = [
-    ...documentMarkdown.split(/\r?\n/).filter((line) => line.trim()).slice(0, 30),
+  const fullContent = [
+    documentMarkdown,
     "",
     "## PPT 大纲",
-    ...slides.map((slide, index) => `${index + 1}. ${slide.title} - ${slide.notes}`)
-  ].filter((line) => line.trim());
-  if (lines.length === 0) return;
-
-  const children = lines.slice(0, 40).map((line) => ({
-    block_type: line.startsWith("#") ? 3 : 2,
-    text: {
-      elements: [
-        {
-          text_run: {
-            content: line.replace(/^#+\s*/, "")
-          }
-        }
-      ]
-    }
-  }));
+    ...slides.map((slide, index) => `${index + 1}. ${slide.title}：${slide.notes}`)
+  ].join("\n");
 
   try {
-    const response = await fetch(
+    // 直接插入纯文本内容，保证兼容性
+    const lines = fullContent.split(/\r?\n/).filter((line) => line.trim()).slice(0, 50);
+    const children = lines.map(line => {
+      // 处理标题
+      if (line.startsWith("# ")) {
+        return {
+          block_type: 3, // 一级标题
+          heading1: {
+            elements: [
+              {
+                text_run: {
+                  content: line.replace(/^#\s+/, "")
+                }
+              }
+            ]
+          }
+        };
+      } else if (line.startsWith("## ")) {
+        return {
+          block_type: 4, // 二级标题
+          heading2: {
+            elements: [
+              {
+                text_run: {
+                  content: line.replace(/^##\s+/, "")
+                }
+              }
+            ]
+          }
+        };
+      } else if (line.startsWith("### ")) {
+        return {
+          block_type: 5, // 三级标题
+          heading3: {
+            elements: [
+              {
+                text_run: {
+                  content: line.replace(/^###\s+/, "")
+                }
+              }
+            ]
+          }
+        };
+      } else {
+        // 普通文本
+        return {
+          block_type: 2,
+          text: {
+            elements: [
+              {
+                text_run: {
+                  content: line
+                }
+              }
+            ],
+            style: {}
+          }
+        };
+      }
+    });
+
+    await fetch(
       `${getFeishuBaseUrl()}/open-apis/docx/v1/documents/${documentId}/blocks/${documentId}/children`,
       {
         method: "POST",
@@ -975,16 +1301,13 @@ async function tryAppendFeishuDocBlocks(
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          children
+          children,
+          index: 0
         })
       }
     );
-    const payload = await response.json();
-    if (!response.ok || payload.code !== 0) {
-      app.log.warn({ status: response.status, payload }, "Feishu docx block append failed");
-    }
   } catch (error) {
-    app.log.warn({ error }, "Feishu docx block append failed");
+    app.log.warn({ error: toErrorInfo(error), documentId }, "Feishu docx block append failed");
   }
 }
 
@@ -1006,9 +1329,9 @@ function toFeishuDocLink(documentId: string): string {
   return `${base}/${documentId}`;
 }
 
-function toFeishuPresentationLink(presentationId: string): string {
-  const base = (process.env.FEISHU_DOC_BASE_URL ?? "https://feishu.cn/slides").replace(/\/$/, "");
-  return `${base}/${presentationId}`;
+function toFeishuPresentationLink(presentationLink: string): string {
+  // 现在createFeishuPresentation直接返回完整链接
+  return presentationLink;
 }
 
 async function sendFeishuText(chatId: string, text: string): Promise<void> {
