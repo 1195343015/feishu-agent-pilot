@@ -1304,12 +1304,7 @@ async function tryAppendFeishuDocBlocks(
   documentMarkdown: string,
   slides: GeneratedSlide[]
 ): Promise<void> {
-  const fullContent = [
-    documentMarkdown,
-    "",
-    "## PPT 大纲",
-    ...slides.map((slide, index) => `${index + 1}. ${slide.title}：${slide.notes}`)
-  ].join("\n");
+  const fullContent = documentMarkdown;
 
   try {
     // 直接插入纯文本内容，保证兼容性
