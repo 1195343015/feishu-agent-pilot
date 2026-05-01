@@ -486,6 +486,7 @@ async function generateWithOpenAI(prompt: string, context: string): Promise<Agen
           content: [
             "你是 Agent-Pilot 的办公协同 Planner。",
             "你需要把用户 IM 指令拆解为可执行步骤，并生成需求文档和 5 页演示稿大纲。",
+            "如果上下文中提供了已有的文档内容和PPT大纲，请基于已有内容进行迭代修改，不要完全重新生成，保持原有结构的同时根据用户指令调整内容。",
             "只输出 JSON 对象，不要输出 Markdown 代码围栏。",
             "JSON 字段必须是 summary, steps, documentMarkdown, slides。",
             "steps 每项包含 type 和 summary，type 只能是 plan, doc_generate, doc_review, slide_generate, rehearsal, delivery。",
@@ -612,7 +613,22 @@ function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask
 
 async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: string): Promise<void> {
   const startedAt = performance.now();
-  const generation = await generateAgentPlan(input.prompt, `飞书会话 ${input.chatId} 中的 IM 指令`);
+  
+  // 获取已有上下文，实现多轮迭代
+  const room = getRoom(workspaceId);
+  const existingDocument = room.doc.getText("document").toString();
+  const existingSlides = room.doc.getArray<Y.Map<unknown>>("slides").toArray().map((slide) => ({
+    title: String(slide.get("title") ?? ""),
+    notes: String(slide.get("notes") ?? "")
+  }));
+  
+  let context = `飞书会话 ${input.chatId} 中的 IM 指令`;
+  // 如果有已有内容，将其加入上下文用于迭代修改
+  if (existingDocument.trim() || existingSlides.length > 0) {
+    context += `\n\n已有的文档内容：\n${existingDocument}\n\n已有的PPT大纲：\n${existingSlides.map((s, i) => `${i+1}. ${s.title}: ${s.notes}`).join("\n")}\n\n请根据用户最新的修改指令，基于以上已有内容进行迭代更新，不要完全重新生成。`;
+  }
+
+  const generation = await generateAgentPlan(input.prompt, context);
   const generationMs = Math.round(performance.now() - startedAt);
   app.log.info(
     { chatId: input.chatId, workspaceId, provider: generation.provider, generationMs },
