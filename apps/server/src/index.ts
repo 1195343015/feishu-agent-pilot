@@ -616,6 +616,7 @@ async function generateDocWithOpenAI(prompt: string, context: string): Promise<A
     body: JSON.stringify({
       model,
       temperature: 0.3,
+      thinking: { type: "disabled" },
       response_format: { type: "json_object" },
       messages: [
         {
@@ -680,6 +681,7 @@ async function generateSlidesFromDoc(prompt: string, documentMarkdown: string): 
       body: JSON.stringify({
         model,
         temperature: 0.3,
+        thinking: { type: "disabled" },
         response_format: { type: "json_object" },
         messages: [
           {
