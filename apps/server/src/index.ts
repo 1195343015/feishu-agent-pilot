@@ -42,11 +42,39 @@ app.options("*", async (_request, reply) => {
   return "";
 });
 
-app.get("/health", async () => ({
-  ok: true,
-  service: "agent-pilot-sync",
-  llm: process.env.OPENAI_API_KEY ? "configured" : "fallback"
-}));
+app.get("/health", async () => {
+  const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+  const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+  const hasApiKey = !!process.env.OPENAI_API_KEY;
+  let llmStatus: "ok" | "error" | "not_configured" = "not_configured";
+  let latencyMs: number | null = null;
+
+  if (hasApiKey) {
+    try {
+      const start = performance.now();
+      const res = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        signal: AbortSignal.timeout(5000)
+      });
+      latencyMs = Math.round(performance.now() - start);
+      llmStatus = res.ok ? "ok" : "error";
+    } catch {
+      llmStatus = "error";
+    }
+  }
+
+  return {
+    ok: true,
+    service: "agent-pilot-sync",
+    llm: {
+      status: llmStatus,
+      model,
+      provider: new URL(baseUrl).hostname,
+      latencyMs
+    }
+  };
+});
 
 app.post("/api/agent/generate", async (request) => {
   const body = request.body as AgentGenerateRequest | undefined;
@@ -58,6 +86,18 @@ app.post("/api/agent/generate", async (request) => {
   }
 
   return generateAgentPlan(prompt, context);
+});
+
+app.post("/api/agent/generate-slides", async (request) => {
+  const body = request.body as (AgentGenerateRequest & { documentMarkdown?: string }) | undefined;
+  const prompt = body?.prompt?.trim() ?? "";
+  const documentMarkdown = body?.documentMarkdown ?? "";
+
+  if (!prompt) {
+    return { provider: "fallback" as const, slides: createFallbackGeneration(prompt, "").slides };
+  }
+
+  return generateSlidesFromDoc(prompt, documentMarkdown);
 });
 
 app.get("/api/feishu/capabilities", async () => ({
@@ -250,6 +290,78 @@ app.get("/test/ppt/generate", async (_, reply) => {
   }
 });
 
+app.get("/api/feishu/delivery/download-doc", async (request, reply) => {
+  const workspaceId = (request.query as { workspaceId?: string })?.workspaceId;
+  if (!workspaceId) {
+    reply.code(400);
+    return { ok: false, error: "missing workspaceId" };
+  }
+
+  try {
+    const room = getRoom(workspaceId);
+    const documentMarkdown = room.doc.getText("document").toString();
+
+    const lines = documentMarkdown.split(/\r?\n/);
+    let title = "Agent-Pilot 文档";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("# ")) {
+        title = trimmed.replace(/^#\s+/, "").trim();
+        break;
+      }
+    }
+
+    const fileName = `${title.slice(0, 80)}.md`;
+
+    reply.header("Content-Type", "text/markdown; charset=utf-8");
+    reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+    reply.send(documentMarkdown);
+  } catch (error) {
+    app.log.error({ error: toErrorInfo(error), workspaceId }, "Failed to download document");
+    reply.code(500);
+    return { ok: false, error: "Document download failed" };
+  }
+});
+
+app.get("/api/feishu/delivery/download-ppt", async (request, reply) => {
+  const workspaceId = (request.query as { workspaceId?: string })?.workspaceId;
+  if (!workspaceId) {
+    reply.code(400);
+    return { ok: false, error: "missing workspaceId" };
+  }
+
+  try {
+    const room = getRoom(workspaceId);
+    const agentState = room.doc.getMap("agentState");
+    const documentMarkdown = room.doc.getText("document").toString();
+    const slides = room.doc.getArray<Y.Map<unknown>>("slides").toArray().map((slide, index) => ({
+      title: String(slide.get("title") ?? `第 ${index + 1} 页`),
+      notes: String(slide.get("notes") ?? "")
+    }));
+
+    const lines = documentMarkdown.split(/\r?\n/);
+    let title = "Agent-Pilot 演示稿";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("# ")) {
+        title = trimmed.replace(/^#\s+/, "").trim();
+        break;
+      }
+    }
+
+    const pptBuffer = await generatePptFile(title, slides);
+    const fileName = `${title.slice(0, 80)}.pptx`;
+
+    reply.header("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+    reply.send(pptBuffer);
+  } catch (error) {
+    app.log.error({ error: toErrorInfo(error), workspaceId }, "Failed to download PPT");
+    reply.code(500);
+    return { ok: false, error: "PPT generation failed" };
+  }
+});
+
 app.post("/api/feishu/delivery", async (request, reply) => {
   const workspaceId = (request.query as { workspaceId?: string })?.workspaceId;
   if (!workspaceId) {
@@ -397,13 +509,14 @@ type AgentGenerateRequest = {
 };
 
 type GeneratedAgentStep = {
-  type: "plan" | "doc_generate" | "doc_review" | "slide_generate" | "rehearsal" | "delivery";
+  type: "plan" | "doc_generate" | "slide_generate" | "delivery";
   summary: string;
 };
 
 type GeneratedSlide = {
   title: string;
   notes: string;
+  bullets?: string[];
 };
 
 type AgentTask = {
@@ -482,14 +595,16 @@ async function generateAgentPlan(prompt: string, context: string): Promise<Agent
   }
 
   try {
-    return await generateWithOpenAI(prompt, context);
+    const result = await generateDocWithOpenAI(prompt, context);
+    return { ...result, slides: [] };
   } catch (error) {
     app.log.error({ error }, "LLM generation failed, using fallback");
-    return createFallbackGeneration(prompt, context);
+    const fallback = createFallbackGeneration(prompt, context);
+    return { ...fallback, slides: [] };
   }
 }
 
-async function generateWithOpenAI(prompt: string, context: string): Promise<AgentGeneration> {
+async function generateDocWithOpenAI(prompt: string, context: string): Promise<AgentGeneration> {
   const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
   const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
   const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -507,12 +622,11 @@ async function generateWithOpenAI(prompt: string, context: string): Promise<Agen
           role: "system",
           content: [
             "你是 Agent-Pilot 的办公协同 Planner。",
-            "你需要把用户 IM 指令拆解为可执行步骤，并生成需求文档和 5 页演示稿大纲。",
-            "如果上下文中提供了已有的文档内容和PPT大纲，请基于已有内容进行迭代修改，不要完全重新生成，保持原有结构的同时根据用户指令调整内容。",
+            "你需要把用户 IM 指令拆解为可执行步骤，并生成详细的需求文档。",
             "只输出 JSON 对象，不要输出 Markdown 代码围栏。",
-            "JSON 字段必须是 summary, steps, documentMarkdown, slides。",
-            "steps 每项包含 type 和 summary，type 只能是 plan, doc_generate, doc_review, slide_generate, rehearsal, delivery。",
-            "slides 必须是 5 项，每项包含 title 和 notes。"
+            "JSON 字段必须是 summary, steps, documentMarkdown。",
+            "steps 每项包含 type 和 summary，type 只能是 plan, doc_generate, slide_generate, delivery。",
+            "documentMarkdown 必须是一份详细完整的需求文档，包含标题、背景、目标、验收标准等章节。"
           ].join("\n")
         },
         {
@@ -523,8 +637,7 @@ async function generateWithOpenAI(prompt: string, context: string): Promise<Agen
             requiredOutput: {
               summary: "一句话说明 Agent 如何处理任务",
               steps: [{ type: "plan", summary: "步骤说明" }],
-              documentMarkdown: "# 需求文档\n...",
-              slides: [{ title: "页面标题", notes: "讲稿备注" }]
+              documentMarkdown: "# 需求文档\n...(详细完整的长文)"
             }
           })
         }
@@ -533,16 +646,84 @@ async function generateWithOpenAI(prompt: string, context: string): Promise<Agen
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI-compatible API failed: ${response.status} ${await response.text()}`);
+    throw new Error(`API failed: ${response.status} ${await response.text()}`);
   }
 
   const payload = (await response.json()) as ChatCompletionResponse;
   const content = payload.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("OpenAI-compatible API returned empty content");
+  if (!content) throw new Error("API returned empty content");
+
+  const parsed = JSON.parse(content);
+  return {
+    provider: "openai",
+    summary: parsed.summary ?? "已生成任务计划和文档",
+    steps: Array.isArray(parsed.steps) ? parsed.steps.map(normalizeStep).filter(Boolean) as GeneratedAgentStep[] : [],
+    documentMarkdown: typeof parsed.documentMarkdown === "string" ? parsed.documentMarkdown : "",
+    slides: []
+  };
+}
+
+async function generateSlidesFromDoc(prompt: string, documentMarkdown: string): Promise<{ provider: "openai" | "fallback"; slides: GeneratedSlide[] }> {
+  if (!process.env.OPENAI_API_KEY) {
+    return { provider: "fallback", slides: createFallbackGeneration(prompt, "").slides };
   }
 
-  return normalizeGeneration(JSON.parse(content) as Partial<AgentGeneration>, "openai", prompt, context);
+  try {
+    const baseUrl = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+    const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: [
+              "你是 Agent-Pilot 的演示稿生成专家。",
+              "你需要根据已有的文档内容生成演示稿（PPT），页数根据文档内容和用户指令灵活决定（通常 4-8 页）。",
+              "只输出 JSON 对象，不要输出 Markdown 代码围栏。",
+              "JSON 字段必须是 slides 数组，每项包含 title 和 notes。",
+              "重要：notes 必须包含 3-5 条独立的要点，每条用换行符 \\n 分隔，每条不超过 50 字。",
+              "示例：notes: \"用户通过自然语言下达指令\\nAgent 自动解析意图\\n支持群聊和单聊\\n无需切换应用\""
+            ].join("\n")
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              prompt,
+              document: documentMarkdown,
+              requiredOutput: {
+                slides: [{ title: "页面标题", notes: "要点1\\n要点2\\n要点3" }]
+              }
+            })
+          }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`API failed: ${response.status}`);
+    }
+
+    const payload = (await response.json()) as ChatCompletionResponse;
+    const content = payload.choices?.[0]?.message?.content;
+    if (!content) throw new Error("API returned empty content");
+
+    const parsed = JSON.parse(content);
+    const slides = Array.isArray(parsed.slides)
+      ? parsed.slides.map(normalizeSlide).filter(Boolean) as GeneratedSlide[]
+      : [];
+    return { provider: "openai", slides: slides.length > 0 ? slides : createFallbackGeneration(prompt, "").slides };
+  } catch (error) {
+    app.log.error({ error }, "Slide generation failed, using fallback");
+    return { provider: "fallback", slides: createFallbackGeneration(prompt, "").slides };
+  }
 }
 
 function createFallbackGeneration(prompt: string, context: string): AgentGeneration {
@@ -558,7 +739,7 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
     "## 目标",
     "- 捕捉 IM 中的业务需求和上下文",
     "- 自动生成可编辑的需求文档",
-    "- 根据文档结构生成 5 页汇报 PPT 大纲",
+    "- 根据文档结构生成汇报 PPT 大纲",
     "- 支持移动端和桌面端实时同步修改",
     "- 最终交付飞书文档链接、PPT 文件和归档摘要",
     "",
@@ -570,22 +751,60 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
 
   return {
     provider: "fallback",
-    summary: "已基于本地 fallback 生成任务计划、需求文档和 5 页 PPT 大纲。",
+    summary: "已基于本地 fallback 生成任务计划、需求文档和 PPT 大纲。",
     steps: [
       { type: "plan", summary: "理解 IM 指令并拆解任务" },
       { type: "doc_generate", summary: "生成需求文档草稿" },
-      { type: "doc_review", summary: "等待用户检查和补充文档" },
-      { type: "slide_generate", summary: "生成 5 页汇报 PPT 大纲" },
-      { type: "rehearsal", summary: "等待用户确认后进入排练修改" },
+      { type: "slide_generate", summary: "生成汇报 PPT 大纲" },
       { type: "delivery", summary: "生成飞书文档链接和归档摘要" }
     ],
     documentMarkdown,
     slides: [
-      { title: "项目背景与痛点", notes: `说明「${prompt}」来自 IM 讨论，强调跨应用手工整理成本。` },
-      { title: "Agent-Pilot 目标", notes: "说明 Agent 主驾驶、GUI 辅助操作台的产品定位。" },
-      { title: "多端协同框架", notes: "解释移动端和桌面端通过 Yjs 实时同步状态和内容。" },
-      { title: "文档到 PPT 的自动化链路", notes: "展示从 IM 指令到文档，再到演示稿的编排过程。" },
-      { title: "交付物与后续计划", notes: "总结飞书文档链接、PPT 文件和归档摘要。" }
+      {
+        title: "项目背景与痛点",
+        notes: [
+          `需求源自 IM 讨论：「${prompt}」`,
+          "手动从聊天记录整理信息到文档和 PPT，过程繁琐易遗漏",
+          "跨应用切换每周消耗 3-5 小时在信息搬运和格式转换上",
+          "内容散落不同渠道，缺乏统一沉淀，导致版本混乱"
+        ].join("\n")
+      },
+      {
+        title: "Agent-Pilot 目标与定位",
+        notes: [
+          "AI Agent 是主驾驶（Pilot），GUI 是辅助操作台（Co-pilot）",
+          "用户通过自然语言（语音/文本）下达指令即可驱动全流程",
+          "从 IM 指令入口直接触发，无需切换应用",
+          "覆盖 IM、文档、演示稿三大场景的端到端自动化"
+        ].join("\n")
+      },
+      {
+        title: "多端协同框架",
+        notes: [
+          "基于 Yjs CRDT 实现移动端和桌面端的实时双向同步",
+          "一端操作无缝同步到另一端，延迟低于 100ms",
+          "支持离线编辑，网络恢复后自动无冲突合并",
+          "WebSocket 长连接 + 冲突检测与自动解决机制"
+        ].join("\n")
+      },
+      {
+        title: "文档到 PPT 的自动化链路",
+        notes: [
+          "Agent 自动解析 IM 对话，提取关键信息生成结构化文档",
+          "文档可实时编辑，修改后自动同步更新 PPT 大纲",
+          "支持自然语言指令调整 PPT（如「增加一页技术方案」）",
+          "完整迭代闭环：修改文档 → 更新 PPT → 生成交付物"
+        ].join("\n")
+      },
+      {
+        title: "交付物与后续计划",
+        notes: [
+          `交付物包含：飞书文档链接、PPT 文件下载、归档摘要`,
+          "文档和 PPT 均可一键导出，直接用于团队汇报或客户演示",
+          "后续规划：支持更多模板样式、接入更多飞书原生能力（表格、多维表格等）",
+          "目标是将 Agent-Pilot 打造成团队日常工作中的智能办公中枢"
+        ].join("\n")
+      }
     ]
   };
 }
@@ -812,32 +1031,11 @@ function buildProgressReply(workspaceId: string): string {
   ].join("\n");
 }
 
-function normalizeGeneration(
-  value: Partial<AgentGeneration>,
-  provider: AgentGeneration["provider"],
-  prompt: string,
-  context: string
-): AgentGeneration {
-  const fallback = createFallbackGeneration(prompt, context);
-  const steps = Array.isArray(value.steps) ? value.steps.map(normalizeStep).filter(Boolean) as GeneratedAgentStep[] : [];
-  const slides = Array.isArray(value.slides) ? value.slides.map(normalizeSlide).filter(Boolean) as GeneratedSlide[] : [];
-
-  return {
-    provider,
-    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary.trim() : fallback.summary,
-    steps: steps.length > 0 ? steps : fallback.steps,
-    documentMarkdown:
-      typeof value.documentMarkdown === "string" && value.documentMarkdown.trim()
-        ? value.documentMarkdown.trim()
-        : fallback.documentMarkdown,
-    slides: slides.length > 0 ? slides.slice(0, 5) : fallback.slides
-  };
-}
 
 function normalizeStep(step: unknown): GeneratedAgentStep | null {
   if (!step || typeof step !== "object") return null;
   const candidate = step as Partial<GeneratedAgentStep>;
-  const allowed = new Set(["plan", "doc_generate", "doc_review", "slide_generate", "rehearsal", "delivery"]);
+  const allowed = new Set(["plan", "doc_generate", "slide_generate", "delivery"]);
   if (!candidate.type || !allowed.has(candidate.type)) return null;
   return {
     type: candidate.type,
@@ -942,7 +1140,7 @@ function writeAgentGenerationToRoom(input: AgentRoomWriteInput): void {
         id: randomUUID(),
         taskId,
         type: step.type,
-        status: index < 3 ? "done" : step.type === "rehearsal" ? "waiting_confirm" : "pending",
+        status: index < 3 ? "done" : "pending",
         summary: step.summary
       }))
     );
@@ -1114,225 +1312,393 @@ async function generatePptFile(title: string, slides: GeneratedSlide[]): Promise
   pptx.company = "智能办公助手";
   pptx.revision = "1.0";
 
-  // 定义全局配色方案
-  const themeColors = {
-    primary: "#2D5BFF",      // 主色：深蓝色
-    secondary: "#6E85FF",    // 辅助色：浅蓝色
-    accent: "#FF7D00",       // 强调色：橙色
-    textDark: "#363636",     // 深色文本
-    textLight: "#666666",    // 浅色文本
-    background: "#FFFFFF",   // 背景色
-    backgroundLight: "#F8F9FA", // 浅色背景
-    border: "#E5E7EB"        // 边框色
+  const C = {
+    primary: "#1A56DB",
+    primaryLight: "#3B82F6",
+    primaryDark: "#1E3A8A",
+    accent: "#F59E0B",
+    accentDark: "#D97706",
+    textDark: "#1F2937",
+    textMid: "#4B5563",
+    textLight: "#9CA3AF",
+    bg: "#FFFFFF",
+    bgSoft: "#F8FAFC",
+    bgWarm: "#FFFBEB",
+    sidebarBg: "#1E3A8A",
+    cardBg: "#F0F4FF",
+    border: "#DBEAFE",
+    green: "#10B981",
+    greenBg: "#ECFDF5",
+    red: "#EF4444",
+    purple: "#8B5CF6",
+    purpleBg: "#F5F3FF",
   };
 
-  // 定义幻灯片母版 - 统一全局样式
-  pptx.defineSlideMaster({
-    title: "MASTER_SLIDE",
-    background: { color: themeColors.background },
-    objects: [
-      // 顶部装饰线
-      {
-        line: {
-          x: 0, y: 0, w: "100%", h: 0,
-          line: { color: themeColors.primary, width: 3 }
-        }
-      },
-      // 底部信息栏
-      { 
-        rect: { 
-          x: 0, y: "95%", w: "100%", h: "5%", 
-          fill: { color: themeColors.backgroundLight } 
-        } 
-      },
-      // 左下角品牌标识
-      {
-        text: {
-          text: "Agent-Pilot",
-          options: {
-            x: 0.5, y: "95.5%", w: 3, h: 0.35,
-            fontSize: 10,
-            color: themeColors.textLight,
-            bold: true
-          }
-        }
-      },
-      // 右下角页码占位符
-      {
-        text: {
-          text: "第 @@SLIDENUMBER 页 / 共 @@TOTALSLIDES 页",
-          options: {
-            x: "85%", y: "95.5%", w: 2, h: 0.35,
-            fontSize: 10,
-            color: themeColors.textLight,
-            align: "right"
-          }
-        }
-      }
-    ],
-    slideNumber: { x: "90%", y: "95.5%" }
+  // --- 目录页序号标记的圆形背景色 ---
+  const tocColors = [C.primary, C.accent, C.green, C.purple, C.red];
+
+  // ========== 封面页 ==========
+  const cover = pptx.addSlide();
+  cover.background = { color: C.bg };
+
+  // 左侧色块
+  cover.addShape(pptx.ShapeType.rect, {
+    x: 0, y: 0, w: 4.8, h: "100%",
+    fill: { color: C.sidebarBg },
+  });
+  // 左侧装饰几何
+  cover.addShape(pptx.ShapeType.rect, {
+    x: 0, y: 0, w: 0.15, h: "100%",
+    fill: { color: C.accent },
+  });
+  cover.addShape(pptx.ShapeType.ellipse, {
+    x: 3.2, y: 1.0, w: 1.2, h: 1.2,
+    fill: { color: C.primaryLight, transparency: 70 },
+    line: { color: C.accent, width: 2 },
+  });
+  cover.addShape(pptx.ShapeType.ellipse, {
+    x: 0.5, y: 5.5, w: 0.8, h: 0.8,
+    fill: { color: C.accent, transparency: 50 },
   });
 
-  // 封面页
-  const coverSlide = pptx.addSlide({ masterName: "MASTER_SLIDE" });
-  // 封面页特殊处理：移除底部信息栏
-  coverSlide.background = { color: themeColors.backgroundLight };
-  coverSlide.addShape(pptx.ShapeType.rect, {
-    x: 0, y: 0, w: "100%", h: "100%",
-    fill: { color: themeColors.primary, transparency: 95 }
+  cover.addText("AGENT-PILOT", {
+    x: 0.5, y: 1.6, w: 4, h: 0.6,
+    fontSize: 14, fontFace: "Arial",
+    color: C.accent, bold: true,
   });
-  coverSlide.addText(title.slice(0, 80), {
-    x: 1,
-    y: 2,
-    w: "85%",
-    h: 2,
-    fontSize: 44,
-    bold: true,
-    align: "center",
-    color: themeColors.primary,
-    wrap: true,
-    margin: 0.1
-  });
-  
-  // 副标题
-  coverSlide.addText("智能办公助手 · 自动生成", {
-    x: 1,
-    y: 4.2,
-    w: "85%",
-    h: 1,
-    fontSize: 24,
-    align: "center",
-    color: themeColors.textLight,
-    wrap: true,
-    margin: 0.1
+  cover.addText(title.slice(0, 80), {
+    x: 0.5, y: 2.3, w: 4, h: 2.5,
+    fontSize: 30, fontFace: "Microsoft YaHei",
+    bold: true, color: C.bg, wrap: true,
+    lineSpacingMultiple: 1.2,
   });
 
-  // 日期
-  coverSlide.addText(new Date().toLocaleDateString("zh-CN"), {
-    x: 1,
-    y: 5.5,
-    w: "85%",
-    h: 0.8,
-    fontSize: 16,
-    align: "center",
-    color: themeColors.textLight,
-    wrap: true,
-    margin: 0.1
+  // 右侧
+  cover.addText("智能办公助手 · 自动生成", {
+    x: 5.5, y: 2.5, w: 6.5, h: 0.8,
+    fontSize: 22, fontFace: "Microsoft YaHei",
+    color: C.primary, bold: true,
+  });
+  cover.addShape(pptx.ShapeType.line, {
+    x: 5.5, y: 3.4, w: 2.5, h: 0,
+    line: { color: C.accent, width: 3 },
+  });
+  cover.addText("从 IM 对话到演示稿的一键智能闭环", {
+    x: 5.5, y: 3.7, w: 6.5, h: 0.6,
+    fontSize: 14, color: C.textMid,
   });
 
-  // 内容页
-  for (const slide of slides) {
-    const contentSlide = pptx.addSlide({ masterName: "MASTER_SLIDE" });
-    
-    // 页面标题 + 装饰线
-    contentSlide.addText(slide.title, {
-      x: 1,
-      y: 0.6,
-      w: "85%",
-      h: 0.9,
-      fontSize: 28,
-      bold: true,
-      color: themeColors.primary,
-      wrap: true,
-      margin: 0.1
+  const dateStr = new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
+  cover.addText(dateStr, {
+    x: 5.5, y: 5.8, w: 4, h: 0.5,
+    fontSize: 13, color: C.textLight,
+  });
+  cover.addText("Powered by Agent-Pilot", {
+    x: 5.5, y: 6.2, w: 4, h: 0.4,
+    fontSize: 11, color: C.textLight, italic: true,
+  });
+
+  // ========== 目录页 ==========
+  if (slides.length > 0) {
+    const tocSlide = pptx.addSlide();
+    tocSlide.background = { color: C.bg };
+
+    // 顶部色带
+    tocSlide.addShape(pptx.ShapeType.rect, {
+      x: 0, y: 0, w: "100%", h: 0.08,
+      fill: { color: C.primary },
     });
-    
-    // 标题下方装饰线
-    contentSlide.addShape(pptx.ShapeType.line, {
-      x: 1, y: 1.5, w: 3, h: 0,
-      line: { color: themeColors.accent, width: 2 }
+
+    tocSlide.addText("目 录", {
+      x: 0.8, y: 0.4, w: 3, h: 0.8,
+      fontSize: 28, fontFace: "Microsoft YaHei",
+      bold: true, color: C.primary,
     });
-    
-    // 按段落拆分内容，每页最多显示4段
-    const paragraphs = slide.notes.split(/\n+/).filter(p => p.trim());
-    const maxParagraphsPerPage = 4;
-    let currentPageContent = [];
-    
-    for (let i = 0; i < paragraphs.length; i++) {
-      currentPageContent.push(paragraphs[i].trim());
-      
-      // 满4段或者到最后一段时，写入当前页
-      if (currentPageContent.length === maxParagraphsPerPage || i === paragraphs.length - 1) {
-        // 如果不是第一页，需要新建页面
-        let targetSlide = contentSlide;
-        if (i >= maxParagraphsPerPage) {
-          targetSlide = pptx.addSlide({ masterName: "MASTER_SLIDE" });
-          targetSlide.addText(`${slide.title}（续）`, {
-            x: 1,
-            y: 0.6,
-            w: "85%",
-            h: 0.9,
-            fontSize: 24,
-            bold: true,
-            color: themeColors.primary,
-            wrap: true,
-            margin: 0.1
-          });
-          
-          // 续页装饰线
-          targetSlide.addShape(pptx.ShapeType.line, {
-            x: 1, y: 1.5, w: 3, h: 0,
-            line: { color: themeColors.accent, width: 2 }
-          });
-        }
-        
-        // 构建富文本内容，支持列表样式和段落间距
-        const textElements = currentPageContent.map((p, index) => ({
-          text: `• ${p}\n\n`,
-          options: {
-            fontSize: 16,
-            color: index % 2 === 0 ? themeColors.textDark : themeColors.textLight,
-            margin: [0, 0, 0.2, 0] as [number, number, number, number]
-          }
-        })) as { text: string; options: { fontSize: number; color: string; margin: [number, number, number, number] } }[];
-        
-        targetSlide.addText(textElements, {
-            x: 1,
-            y: 1.8,
-            w: "85%",
-            h: 5,
-            wrap: true,
-            valign: "top",
-            margin: 0.15,
-            lineSpacingMultiple: 1.3 // 行间距1.3倍
-          });
-        
-        currentPageContent = [];
+    tocSlide.addShape(pptx.ShapeType.line, {
+      x: 0.8, y: 1.25, w: 1.5, h: 0,
+      line: { color: C.accent, width: 3 },
+    });
+    tocSlide.addText("CONTENTS", {
+      x: 2.5, y: 0.5, w: 3, h: 0.6,
+      fontSize: 12, color: C.textLight,
+    });
+
+    // 目录条目，两列布局
+    const cols = 2;
+    const colW = 5.5;
+    const rowH = 0.9;
+    const startY = 1.7;
+    const startX = 0.8;
+
+    slides.forEach((slide, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = startX + col * colW;
+      const y = startY + row * rowH;
+      const colorIdx = i % tocColors.length;
+
+      // 序号圆
+      tocSlide.addShape(pptx.ShapeType.ellipse, {
+        x, y: y + 0.1, w: 0.55, h: 0.55,
+        fill: { color: tocColors[colorIdx] },
+      });
+      tocSlide.addText(String(i + 1), {
+        x, y: y + 0.1, w: 0.55, h: 0.55,
+        fontSize: 14, color: C.bg, bold: true, align: "center", valign: "middle",
+      });
+      // 标题
+      tocSlide.addText(slide.title, {
+        x: x + 0.75, y: y + 0.1, w: colW - 1.2, h: 0.55,
+        fontSize: 15, color: C.textDark, bold: true, valign: "middle",
+      });
+      // 底部分割线
+      if (row < Math.ceil(slides.length / cols) - 1 || col === 0) {
+        tocSlide.addShape(pptx.ShapeType.line, {
+          x: x + 0.75, y: y + 0.75, w: colW - 1.2, h: 0,
+          line: { color: C.border, width: 0.5 },
+        });
       }
-    }
+    });
   }
-  
-  // 结束页
-  const endSlide = pptx.addSlide({ masterName: "MASTER_SLIDE" });
-  endSlide.background = { color: themeColors.backgroundLight };
-  endSlide.addShape(pptx.ShapeType.rect, {
-    x: 0, y: 0, w: "100%", h: "100%",
-    fill: { color: themeColors.primary, transparency: 95 }
+
+  // ========== 内容页 ==========
+  slides.forEach((slide, slideIndex) => {
+    // 从 notes 或 bullets 中提取要点列表
+    const rawBullets: string[] = slide.bullets && slide.bullets.length > 0
+      ? slide.bullets
+      : slide.notes
+          .split(/\n+/)
+          .map(p => p.trim().replace(/^[-•*\d.、]+\s*/, ""))
+          .filter(p => p.length > 0);
+    if (rawBullets.length === 0) rawBullets.push("（暂无详细内容）");
+
+    // 每页最多4条要点
+    const pageSize = 4;
+    const pages: string[][] = [];
+    for (let i = 0; i < rawBullets.length; i += pageSize) {
+      pages.push(rawBullets.slice(i, i + pageSize));
+    }
+
+    pages.forEach((page, pageIdx) => {
+      const s = pptx.addSlide();
+      s.background = { color: C.bg };
+
+      // 顶部色带
+      s.addShape(pptx.ShapeType.rect, {
+        x: 0, y: 0, w: "100%", h: 0.08,
+        fill: { color: C.primary },
+      });
+      // 左侧章节色条
+      s.addShape(pptx.ShapeType.rect, {
+        x: 0, y: 0, w: 0.12, h: "100%",
+        fill: { color: tocColors[slideIndex % tocColors.length] },
+      });
+
+      // 章节标签
+      s.addShape(pptx.ShapeType.rect, {
+        x: 0.5, y: 0.35, w: 1.6, h: 0.45,
+        fill: { color: C.cardBg },
+        rectRadius: 0.1,
+      });
+      s.addText(`PART ${String(slideIndex + 1).padStart(2, "0")}`, {
+        x: 0.5, y: 0.35, w: 1.6, h: 0.45,
+        fontSize: 12, color: C.primary, bold: true, align: "center", valign: "middle",
+      });
+
+      // 标题
+      const titleText = pages.length > 1 && pageIdx > 0 ? `${slide.title}（续 ${pageIdx + 1}）` : slide.title;
+      s.addText(titleText, {
+        x: 0.5, y: 1.0, w: "90%", h: 0.8,
+        fontSize: 26, fontFace: "Microsoft YaHei",
+        bold: true, color: C.textDark, wrap: true,
+      });
+      s.addShape(pptx.ShapeType.line, {
+        x: 0.5, y: 1.85, w: 2.0, h: 0,
+        line: { color: C.accent, width: 2.5 },
+      });
+
+      // 根据要点数量选择布局
+      if (page.length <= 2) {
+        // 宽卡片布局：每条占半页宽度，左右分栏
+        const colW = 5.4;
+        const cardH = 4.2;
+        const startY = 2.15;
+        const gap = 0.25;
+
+        page.forEach((para, pi) => {
+          const col = pi % 2;
+          const row = Math.floor(pi / 2);
+          const cx = 0.5 + col * (colW + gap);
+          const cy = startY + row * (cardH + 0.2);
+
+          // 卡片背景
+          s.addShape(pptx.ShapeType.roundRect, {
+            x: cx, y: cy, w: colW, h: cardH,
+            fill: { color: col === 0 ? C.cardBg : C.bgSoft },
+            rectRadius: 0.15,
+            line: { color: C.border, width: 0.5 },
+          });
+          // 顶部色条
+          s.addShape(pptx.ShapeType.rect, {
+            x: cx + 0.15, y: cy + 0.15, w: colW - 0.3, h: 0.06,
+            fill: { color: tocColors[(slideIndex + pi) % tocColors.length] },
+          });
+          // 序号圆
+          s.addShape(pptx.ShapeType.ellipse, {
+            x: cx + 0.3, y: cy + 0.45, w: 0.55, h: 0.55,
+            fill: { color: tocColors[(slideIndex + pi) % tocColors.length] },
+          });
+          s.addText(String(pi + 1), {
+            x: cx + 0.3, y: cy + 0.45, w: 0.55, h: 0.55,
+            fontSize: 14, color: C.bg, bold: true, align: "center", valign: "middle",
+          });
+          // 文字
+          s.addText(para, {
+            x: cx + 0.3, y: cy + 1.2, w: colW - 0.6, h: cardH - 1.5,
+            fontSize: 13, color: C.textMid, wrap: true, valign: "top",
+            lineSpacingMultiple: 1.3,
+          });
+        });
+      } else {
+        // 紧凑卡片布局：3-4条要点，单列卡片
+        const cardH = 1.15;
+        const cardGap = 0.15;
+        const startY = 2.15;
+
+        page.forEach((para, pi) => {
+          const cy = startY + pi * (cardH + cardGap);
+          // 卡片背景
+          s.addShape(pptx.ShapeType.roundRect, {
+            x: 0.5, y: cy, w: 11.5, h: cardH,
+            fill: { color: pi % 2 === 0 ? C.bgSoft : C.cardBg },
+            rectRadius: 0.1,
+            line: { color: C.border, width: 0.5 },
+          });
+          // 左侧色条
+          s.addShape(pptx.ShapeType.rect, {
+            x: 0.5, y: cy, w: 0.08, h: cardH,
+            fill: { color: tocColors[(slideIndex + pi) % tocColors.length] },
+          });
+          // 序号
+          s.addShape(pptx.ShapeType.ellipse, {
+            x: 0.9, y: cy + 0.3, w: 0.5, h: 0.5,
+            fill: { color: tocColors[(slideIndex + pi) % tocColors.length] },
+          });
+          s.addText(String(pi + 1), {
+            x: 0.9, y: cy + 0.3, w: 0.5, h: 0.5,
+            fontSize: 12, color: C.bg, bold: true, align: "center", valign: "middle",
+          });
+          // 文字
+          s.addText(para, {
+            x: 1.7, y: cy + 0.1, w: 10.0, h: cardH - 0.2,
+            fontSize: 13, color: C.textMid, wrap: true, valign: "middle",
+            lineSpacingMultiple: 1.25,
+          });
+        });
+      }
+
+      // 底部信息栏
+      s.addShape(pptx.ShapeType.rect, {
+        x: 0, y: 7.1, w: "100%", h: 0.4,
+        fill: { color: C.bgSoft },
+      });
+      s.addText("Agent-Pilot", {
+        x: 0.5, y: 7.1, w: 2.5, h: 0.4,
+        fontSize: 9, color: C.textLight, bold: true, valign: "middle",
+      });
+      s.addText(`${slideIndex + 1} / ${slides.length}`, {
+        x: 10.5, y: 7.1, w: 1.5, h: 0.4,
+        fontSize: 9, color: C.textLight, align: "right", valign: "middle",
+      });
+    });
   });
-  
+
+  // ========== 总结页 ==========
+  const summarySlide = pptx.addSlide();
+  summarySlide.background = { color: C.bg };
+  summarySlide.addShape(pptx.ShapeType.rect, {
+    x: 0, y: 0, w: "100%", h: 0.08,
+    fill: { color: C.primary },
+  });
+
+  summarySlide.addText("总结回顾", {
+    x: 0.8, y: 0.5, w: 5, h: 0.8,
+    fontSize: 28, fontFace: "Microsoft YaHei",
+    bold: true, color: C.primary,
+  });
+  summarySlide.addShape(pptx.ShapeType.line, {
+    x: 0.8, y: 1.35, w: 2.0, h: 0,
+    line: { color: C.accent, width: 3 },
+  });
+
+  slides.forEach((slide, i) => {
+    const y = 1.7 + i * 0.95;
+    if (y > 6.5) return;
+    const colorIdx = i % tocColors.length;
+
+    // 卡片
+    summarySlide.addShape(pptx.ShapeType.roundRect, {
+      x: 0.8, y, w: 11, h: 0.75,
+      fill: { color: i % 2 === 0 ? C.bgSoft : C.cardBg },
+      rectRadius: 0.1,
+      line: { color: C.border, width: 0.5 },
+    });
+    // 序号
+    summarySlide.addShape(pptx.ShapeType.ellipse, {
+      x: 1.1, y: y + 0.15, w: 0.45, h: 0.45,
+      fill: { color: tocColors[colorIdx] },
+    });
+    summarySlide.addText(String(i + 1), {
+      x: 1.1, y: y + 0.15, w: 0.45, h: 0.45,
+      fontSize: 12, color: C.bg, bold: true, align: "center", valign: "middle",
+    });
+    // 标题
+    summarySlide.addText(slide.title, {
+      x: 1.8, y, w: 4, h: 0.75,
+      fontSize: 15, color: C.textDark, bold: true, valign: "middle",
+    });
+    // 摘要（取第一段前40字）
+    const preview = slide.notes.replace(/\n+/g, " ").trim().slice(0, 50);
+    summarySlide.addText(preview + (preview.length >= 50 ? "..." : ""), {
+      x: 6, y, w: 5.5, h: 0.75,
+      fontSize: 12, color: C.textMid, valign: "middle",
+    });
+  });
+
+  // ========== 结束页 ==========
+  const endSlide = pptx.addSlide();
+  endSlide.background = { color: C.sidebarBg };
+
+  // 装饰
+  endSlide.addShape(pptx.ShapeType.ellipse, {
+    x: 10.5, y: 0.5, w: 2.5, h: 2.5,
+    fill: { color: C.primaryLight, transparency: 75 },
+  });
+  endSlide.addShape(pptx.ShapeType.ellipse, {
+    x: -0.5, y: 5.5, w: 2, h: 2,
+    fill: { color: C.accent, transparency: 70 },
+  });
+
   endSlide.addText("感谢观看", {
-    x: 1,
-    y: 2.5,
-    w: "85%",
-    h: 1.5,
-    fontSize: 48,
-    bold: true,
-    align: "center",
-    color: themeColors.primary,
-    wrap: true,
-    margin: 0.1
+    x: 1, y: 2.2, w: "85%", h: 1.5,
+    fontSize: 48, fontFace: "Microsoft YaHei",
+    bold: true, align: "center", color: C.bg,
   });
-  
+  endSlide.addText("THANK YOU", {
+    x: 1, y: 3.6, w: "85%", h: 0.6,
+    fontSize: 16, color: C.accent, align: "center",
+  });
+  endSlide.addShape(pptx.ShapeType.line, {
+    x: 4.5, y: 4.5, w: 4, h: 0,
+    line: { color: C.accent, width: 2 },
+  });
   endSlide.addText("Generated by Agent-Pilot · 智能办公助手", {
-    x: 1,
-    y: 4.5,
-    w: "85%",
-    h: 1,
-    fontSize: 18,
-    align: "center",
-    color: themeColors.textLight,
-    wrap: true,
-    margin: 0.1
+    x: 1, y: 5.0, w: "85%", h: 0.6,
+    fontSize: 14, align: "center", color: "93C5FD",
+  });
+  endSlide.addText(dateStr, {
+    x: 1, y: 5.6, w: "85%", h: 0.5,
+    fontSize: 12, align: "center", color: "93C5FD", transparency: 40,
   });
 
   const buffer = await pptx.write({ outputType: "nodebuffer" });

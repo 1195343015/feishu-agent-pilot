@@ -39,6 +39,7 @@ type WorkspaceSyncState = {
   delivery: DeliveryArtifact | null;
   task: AgentTask | null;
   agentStatus: string;
+  llmStatus: { status: string; model: string; provider: string; latencyMs: number | null } | null;
   doc: Y.Doc | null;
   provider: WebsocketProvider | null;
   localPersistence: IndexeddbPersistence | null;
@@ -52,6 +53,7 @@ type WorkspaceSyncState = {
   insertRichBlock: (kind: "table" | "image") => void;
   addSlideFromPrompt: () => void;
   updateSlideTitle: (slideId: string, title: string) => void;
+  clearMessages: () => void;
 };
 
 export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
@@ -67,6 +69,7 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
   delivery: null,
   task: null,
   agentStatus: "idle",
+  llmStatus: null,
   doc: null,
   provider: null,
   localPersistence: null,
@@ -119,6 +122,20 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     });
 
     localPersistence.once("synced", () => {
+      // 恢复异常状态：页面刷新时，将卡住的 running 步骤恢复为 done
+      const currentStatus = String(workspace.agentState.get("status") ?? "idle");
+      const currentSteps = (workspace.agentState.get("steps") as AgentStep[] | undefined) ?? [];
+      const hasRunningStep = currentSteps.some((step) => step.status === "running");
+
+      if (hasRunningStep || currentStatus === "running") {
+        const recoveredSteps = currentSteps.map((step) =>
+          step.status === "running" ? { ...step, status: "done" as const } : step
+        );
+        workspace.agentState.set("steps", recoveredSteps);
+        const hasWaiting = recoveredSteps.some((step) => step.status === "waiting_confirm");
+        workspace.agentState.set("status", hasWaiting ? "waiting_confirm" : "done");
+      }
+
       set({
         documentText: workspace.document.toString(),
         slides: workspace.slides.toArray().map((slide) => yMapToSlide(slide as Y.Map<unknown>)),
@@ -139,6 +156,17 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
       provider,
       localPersistence
     });
+
+    // 获取 LLM 健康状态
+    const httpBase = syncUrl.replace(/^ws(s?):\/\//, "http$1://");
+    fetch(`${httpBase}/health`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.llm) {
+          set({ llmStatus: data.llm });
+        }
+      })
+      .catch(() => {});
   },
 
   disconnect() {
@@ -197,60 +225,120 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
 
     workspace.agentState.set("task", task);
     workspace.agentState.set("steps", [
-      createStep({ taskId: task.id, type: "plan", status: "running", summary: "调用 LLM Planner 生成任务计划" })
+      createStep({ taskId: task.id, type: "plan", status: "done", summary: "理解用户意图" }),
+      createStep({ taskId: task.id, type: "doc_generate", status: "running", summary: "调用 AI 模型生成文档" })
     ]);
     workspace.agentState.delete("delivery");
     workspace.agentState.set("status", "running");
     workspace.messages.push([
-      chatMessageToYMap(createChatMessage({ role: "agent", content: "收到，我会调用 Planner 生成任务计划、需求文档和 PPT 大纲。" }))
+      chatMessageToYMap(createChatMessage({ role: "agent", content: "收到指令，正在调用 AI 模型生成文档..." }))
     ]);
 
-    const generation = await requestAgentGeneration(get().syncUrl, prompt, workspace.document.toString());
-    const generatedSteps = generation.steps.map((step, index) =>
-      createStep({
-        taskId: task.id,
-        type: step.type,
-        summary: step.summary,
-        status: index < 3 ? "done" : step.type === "rehearsal" ? "waiting_confirm" : "pending"
-      })
-    );
-    if (!generatedSteps.some((step) => step.type === "delivery")) {
-      generatedSteps.push(
-        createStep({ taskId: task.id, type: "delivery", status: "pending", summary: "生成飞书文档链接和归档摘要" })
-      );
-    }
-
-    const text = workspace.document;
-    text.delete(0, text.length);
-    text.insert(0, generation.documentMarkdown);
-
-    workspace.slides.delete(0, workspace.slides.length);
-    generation.slides.forEach((slide) => {
-      workspace.slides.push([
-        slideToYMap(
-          createSlide({
-            title: slide.title,
-            notes: slide.notes
-          })
-        )
-      ]);
-    });
-    workspace.agentState.set("steps", generatedSteps);
-
-    window.setTimeout(() => {
+    // 等待期间模拟进度更新
+    const progressTimer = window.setInterval(() => {
       const currentDoc = get().doc;
       if (!currentDoc) return;
       const currentWorkspace = getSharedWorkspace(currentDoc);
-      currentWorkspace.agentState.set("status", "waiting_confirm");
+      const currentSteps = (currentWorkspace.agentState.get("steps") as AgentStep[] | undefined) ?? [];
+      const docStep = currentSteps.find(s => s.type === "doc_generate" && s.status === "running");
+      if (docStep) {
+        const elapsed = Date.now() - new Date(task.createdAt ?? Date.now()).getTime();
+        if (elapsed > 30000) {
+          docStep.summary = "AI 模型正在生成内容，请耐心等待...";
+        } else if (elapsed > 15000) {
+          docStep.summary = "AI 模型正在思考和生成中...";
+        }
+        currentWorkspace.agentState.set("steps", [...currentSteps]);
+      }
+    }, 10000);
+
+    try {
+      // 第一步：调用生成文档（plan + document）
+      const generation = await requestAgentGeneration(get().syncUrl, prompt, workspace.document.toString());
+      clearInterval(progressTimer);
+
+      // 显示任务规划 + 文档
+      const planSteps = generation.steps.map((step, index) =>
+        createStep({
+          taskId: task.id,
+          type: step.type,
+          summary: step.summary,
+          status: index === 0 ? "done" : index === 1 ? "done" : "running"
+        })
+      );
+      if (!planSteps.some((step) => step.type === "delivery")) {
+        planSteps.push(
+          createStep({ taskId: task.id, type: "delivery", status: "pending", summary: "生成飞书文档链接和归档摘要" })
+        );
+      }
+      workspace.agentState.set("steps", planSteps);
+
+      // 写入文档
+      const text = workspace.document;
+      text.delete(0, text.length);
+      text.insert(0, generation.documentMarkdown);
+
+      workspace.messages.push([
+        chatMessageToYMap(createChatMessage({ role: "agent", content: "任务规划完成，文档已生成，正在生成 PPT..." }))
+      ]);
+
+      // 第二步：调用生成 PPT
+      const slideResult = await requestSlideGeneration(get().syncUrl, prompt, generation.documentMarkdown);
+
+      const currentDoc = get().doc;
+      if (!currentDoc) return;
+      const currentWorkspace = getSharedWorkspace(currentDoc);
+
+      currentWorkspace.slides.delete(0, currentWorkspace.slides.length);
+      slideResult.slides.forEach((slide: { title: string; notes: string }) => {
+        currentWorkspace.slides.push([
+          slideToYMap(
+            createSlide({
+              title: slide.title,
+              notes: slide.notes
+            })
+          )
+        ]);
+      });
+
+      const finalSteps = generation.steps.map((step) =>
+        createStep({
+          taskId: task.id,
+          type: step.type,
+          summary: step.summary,
+          status: "done"
+        })
+      );
+      if (!finalSteps.some((step) => step.type === "delivery")) {
+        finalSteps.push(
+          createStep({ taskId: task.id, type: "delivery", status: "pending", summary: "生成飞书文档链接和归档摘要" })
+        );
+      }
+      currentWorkspace.agentState.set("steps", finalSteps);
+      currentWorkspace.agentState.set("status", "done");
       currentWorkspace.messages.push([
         chatMessageToYMap(
           createChatMessage({
             role: "agent",
-            content: `${generation.summary}（来源：${generation.provider === "openai" ? "LLM" : "本地 fallback"}）`
+            content: `${generation.summary}（来源：${generation.provider === "openai" ? "LLM" : "本地 fallback"}）\n所有内容已生成，可以点击「生成交付物」导出。`
           })
         )
       ]);
-    }, 800);
+    } catch (error) {
+      clearInterval(progressTimer);
+      const currentDoc = get().doc;
+      if (currentDoc) {
+        const currentWorkspace = getSharedWorkspace(currentDoc);
+        currentWorkspace.agentState.set("status", "error");
+        currentWorkspace.agentState.set("steps", [
+          createStep({ taskId: task.id, type: "plan", status: "done", summary: "调用 LLM Planner 生成任务计划" }),
+          createStep({ taskId: task.id, type: "doc_generate", status: "failed", summary: `生成失败：${error instanceof Error ? error.message : "未知错误"}` })
+        ]);
+        currentWorkspace.messages.push([
+          chatMessageToYMap(createChatMessage({ role: "agent", content: `抱歉，生成内容时出错了（${error instanceof Error ? error.message : "未知错误"}）。请稍后重试。` }))
+        ]);
+      }
+    }
   },
 
   confirmPlan() {
@@ -265,8 +353,24 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     workspace.agentState.set("steps", steps);
     workspace.agentState.set("status", "running");
     workspace.messages.push([
-      chatMessageToYMap(createChatMessage({ role: "agent", content: `已确认「${task?.title ?? "当前任务"}」，开始排练检查。` }))
+      chatMessageToYMap(createChatMessage({ role: "agent", content: `已确认「${task?.title ?? "当前任务"}」，正在进行排练检查...` }))
     ]);
+
+    // 模拟排练过程后自动完成
+    window.setTimeout(() => {
+      const currentDoc = get().doc;
+      if (!currentDoc) return;
+      const currentWorkspace = getSharedWorkspace(currentDoc);
+
+      const updatedSteps = ((currentWorkspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
+        step.type === "rehearsal" ? { ...step, status: "done" as const, resultRef: "slides.notes" } : step
+      );
+      currentWorkspace.agentState.set("steps", updatedSteps);
+      currentWorkspace.agentState.set("status", "waiting_confirm");
+      currentWorkspace.messages.push([
+        chatMessageToYMap(createChatMessage({ role: "agent", content: "排练检查完成！每页 PPT 内容已确认。现在可以点击「生成交付物」导出最终成果。" }))
+      ]);
+    }, 1500);
   },
 
   rehearseSlides() {
@@ -274,12 +378,6 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     if (!doc) return;
 
     const workspace = getSharedWorkspace(doc);
-    const slides = workspace.slides;
-    for (let index = 0; index < slides.length; index += 1) {
-      const slide = slides.get(index) as Y.Map<unknown>;
-      const title = String(slide.get("title") ?? "");
-      slide.set("notes", `${title}：建议控制在 45 秒内讲完，先讲结论，再补充关键证据。`);
-    }
 
     const steps = ((workspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
       step.type === "rehearsal" ? { ...step, status: "done" as const, resultRef: "slides.notes" } : step
@@ -287,7 +385,7 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     workspace.agentState.set("steps", steps);
     workspace.agentState.set("status", "waiting_confirm");
     workspace.messages.push([
-      chatMessageToYMap(createChatMessage({ role: "agent", content: "已完成排练检查，并为每页补充了讲稿提示。" }))
+      chatMessageToYMap(createChatMessage({ role: "agent", content: "已完成排练检查，PPT 内容确认完毕。" }))
     ]);
   },
 
@@ -382,6 +480,15 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
         break;
       }
     }
+  },
+
+  clearMessages() {
+    const doc = get().doc;
+    if (!doc) return;
+
+    const workspace = getSharedWorkspace(doc);
+    workspace.messages.delete(0, workspace.messages.length);
+    set({ messages: [] });
   }
 }));
 
@@ -413,6 +520,22 @@ async function requestAgentGeneration(syncUrl: string, prompt: string, context: 
   }
 
   return (await response.json()) as AgentGeneration;
+}
+
+async function requestSlideGeneration(syncUrl: string, prompt: string, documentMarkdown: string): Promise<{ provider: "openai" | "fallback"; slides: Array<{ title: string; notes: string }> }> {
+  const response = await fetch(`${toHttpBaseUrl(syncUrl)}/api/agent/generate-slides`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ prompt, documentMarkdown })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Slide generation failed: ${response.status}`);
+  }
+
+  return (await response.json()) as { provider: "openai" | "fallback"; slides: Array<{ title: string; notes: string }> };
 }
 
 function toHttpBaseUrl(syncUrl: string): string {

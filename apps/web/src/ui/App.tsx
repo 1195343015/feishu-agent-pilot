@@ -3,17 +3,25 @@ import {
   CircleOff,
   Cloud,
   CloudOff,
+  Download,
   FileCheck2,
+  FileText,
   Image,
+  ListChecks,
+  Loader2,
   MessageSquareText,
   Mic,
   Play,
   Plus,
   Presentation,
+  Settings,
   Table2,
-  Users
+  Trash2,
+  Users,
+  X,
+  XCircle
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useWorkspaceSync } from "../sync/useWorkspaceSync";
 
 declare global {
@@ -37,20 +45,22 @@ export function App() {
     delivery,
     task,
     agentStatus,
+    llmStatus,
     connect,
     updateDocument,
     sendMessage,
-    confirmPlan,
-    rehearseSlides,
     createDelivery,
     insertRichBlock,
     addSlideFromPrompt,
-    updateSlideTitle
+    updateSlideTitle,
+    clearMessages
   } = useWorkspaceSync();
 
-  const [prompt, setPrompt] = useState("根据这段讨论生成需求文档和 5 页汇报 PPT");
+  const [prompt, setPrompt] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [recognition, setRecognition] = useState<any | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const chatFeedRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
@@ -97,58 +107,99 @@ export function App() {
     connect();
   }, [connect]);
 
+  useEffect(() => {
+    if (chatFeedRef.current) {
+      chatFeedRef.current.scrollTop = chatFeedRef.current.scrollHeight;
+    }
+  }, [messages]);
+
   const isConnected = connection === "connected";
 
   return (
     <main className="shell">
-      <section className="topbar">
-        <div>
-          <p className="eyebrow">Feishu Agent-Pilot</p>
-          <h1>多端协同框架 MVP</h1>
+      {/* ===== 顶栏 ===== */}
+      <header className="topbar">
+        <div className="topbar-left">
+          <span className="topbar-logo">AP</span>
+          <div>
+            <p className="topbar-title">Agent-Pilot</p>
+            <p className="topbar-subtitle">从 IM 对话到演示稿的一键智能闭环</p>
+          </div>
         </div>
         <div className="status-strip">
+          {llmStatus && (
+            <span className={`status-pill ${llmStatus.status === "ok" ? "online" : llmStatus.status === "error" ? "offline" : ""}`}>
+              {llmStatus.status === "ok" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+              {llmStatus.model}
+              {llmStatus.latencyMs != null && ` · ${llmStatus.latencyMs}ms`}
+            </span>
+          )}
           <span className={`status-pill ${isConnected ? "online" : "offline"}`}>
-            {isConnected ? <Cloud size={16} /> : <CloudOff size={16} />}
-            {connection}
+            {isConnected ? <Cloud size={14} /> : <CloudOff size={14} />}
+            {isConnected ? "已连接" : connection}
           </span>
           <span className="status-pill">
-            <Users size={16} />
-            {onlineUsers} 在线
+            <Users size={14} />
+            {onlineUsers}
           </span>
+          <button className={`icon-button settings-btn ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(!showSettings)}>
+            <Settings size={16} />
+          </button>
         </div>
-      </section>
+      </header>
 
-      <section className="workspace-meta">
-        <label>
-          Workspace
-          <input value={workspaceId} onChange={(event) => connect({ workspaceId: event.target.value })} />
-        </label>
-        <label>
-          User
-          <input value={userId} onChange={(event) => connect({ userId: event.target.value })} />
-        </label>
-        <label>
-          Sync Server
-          <input value={syncUrl} onChange={(event) => connect({ syncUrl: event.target.value })} />
-        </label>
-      </section>
+      {/* ===== 设置弹出面板 ===== */}
+      {showSettings && (
+        <div className="settings-overlay" onClick={() => setShowSettings(false)}>
+          <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="settings-header">
+              <h2>连接设置</h2>
+              <button className="icon-button" onClick={() => setShowSettings(false)}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="settings-body">
+              <label>
+                Workspace
+                <input value={workspaceId} onChange={(event) => connect({ workspaceId: event.target.value })} />
+              </label>
+              <label>
+                User
+                <input value={userId} onChange={(event) => connect({ userId: event.target.value })} />
+              </label>
+              <label>
+                Sync Server
+                <input value={syncUrl} onChange={(event) => connect({ syncUrl: event.target.value })} />
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
 
-      <section className="grid">
+      {/* ===== 上方三列：IM / 任务规划 / 协同文档 ===== */}
+      <section className="grid-top">
+        {/* IM 指令入口 */}
         <aside className="panel im-panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Scene A</p>
-              <h2>IM 指令入口</h2>
+            <div className="panel-title-group">
+              <MessageSquareText size={18} className="panel-icon" />
+              <h2>对话指令</h2>
             </div>
-            <MessageSquareText size={20} />
+            <div className="panel-actions">
+              {messages.length > 0 && (
+                <button className="icon-button" onClick={clearMessages} title="清空对话">
+                  <Trash2 size={15} />
+                </button>
+              )}
+            </div>
           </div>
-          <div className="chat-feed">
+          <div className="chat-feed" ref={chatFeedRef}>
             {messages.length === 0 ? (
-              <p className="empty-state">输入自然语言指令，或输入“现在进度到哪了？”查询任务状态。</p>
+              <p className="empty-state">输入自然语言指令启动任务，如"生成一份需求文档和5页PPT"</p>
             ) : (
               messages.map((message) => (
                 <div className={`chat-message ${message.role}`} key={message.id}>
-                  <span>{message.role === "user" ? "用户" : message.role === "agent" ? "Agent" : "系统"}</span>
+                  <span>{message.role === "user" ? "用户" : "Agent"}</span>
                   <p>{message.content}</p>
                 </div>
               ))
@@ -157,100 +208,127 @@ export function App() {
           <textarea
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="@Agent-Pilot 输入自然语言任务，或点击麦克风按钮语音输入"
+            placeholder="输入指令，或点击麦克风语音输入..."
+            rows={2}
           />
           <div className="input-actions">
-            <button 
-              className={`icon-button ${isRecording ? "recording" : ""}`} 
+            <button
+              className={`icon-button ${isRecording ? "recording" : ""}`}
               onClick={toggleRecording}
               disabled={!recognition}
               title={recognition ? "语音输入" : "浏览器不支持语音输入"}
             >
-              <Mic size={18} />
+              <Mic size={16} />
             </button>
             <button className="primary-button" onClick={() => sendMessage(prompt)}>
-              <Play size={18} />
-              发送指令
+              <Play size={15} />
+              发送
             </button>
           </div>
-          <div className="task-card">
-            <div className="task-icon">{task ? <CheckCircle2 size={20} /> : <CircleOff size={20} />}</div>
+          <div className={`task-card ${agentStatus}`}>
+            <div className={`task-icon ${agentStatus}`}>
+              {agentStatus === "running" ? <Loader2 size={18} className="spin" />
+                : agentStatus === "done" ? <CheckCircle2 size={18} />
+                : agentStatus === "failed" ? <XCircle size={18} />
+                : agentStatus === "waiting_confirm" ? <CheckCircle2 size={18} />
+                : <CircleOff size={18} />}
+            </div>
             <div>
-              <p className="task-title">{task?.title ?? "暂无任务"}</p>
-              <p className="task-subtitle">Agent 状态：{agentStatus}</p>
+              <p className="task-title">{task?.title ?? "等待指令"}</p>
+              <p className="task-subtitle">
+                {agentStatus === "running" ? "Agent 正在执行..."
+                  : agentStatus === "waiting_confirm" ? "请检查内容后确认"
+                  : agentStatus === "done" ? "已完成"
+                  : agentStatus === "failed" ? "执行出错"
+                  : "输入指令开始"}
+              </p>
             </div>
           </div>
         </aside>
 
+        {/* 任务规划 */}
         <section className="panel planner-panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Scene B</p>
-              <h2>任务规划与编排</h2>
+            <div className="panel-title-group">
+              <ListChecks size={18} className="panel-icon" />
+              <h2>任务编排</h2>
             </div>
-            <button className="secondary-button" onClick={confirmPlan}>确认继续</button>
           </div>
           <div className="step-list">
             {steps.length === 0 ? (
-              <p className="empty-state">Agent 启动后会生成可组合步骤。</p>
+              <p className="empty-state">发送指令后，Agent 会自动生成任务步骤</p>
             ) : (
-              steps.map((step, index) => (
-                <article className={`step-card ${step.status}`} key={step.id}>
-                  <span>{index + 1}</span>
-                  <div>
-                    <strong>{step.summary}</strong>
-                    <p>{step.type} / {step.status}</p>
-                  </div>
-                </article>
-              ))
+              steps.map((step, index) => {
+                const statusIcon = step.status === "done" ? <CheckCircle2 size={14} />
+                  : step.status === "running" ? <Loader2 size={14} className="spin" />
+                  : step.status === "failed" ? <XCircle size={14} />
+                  : step.status === "waiting_confirm" ? "⏳"
+                  : <span>{index + 1}</span>;
+                return (
+                  <article className={`step-card ${step.status}`} key={step.id}>
+                    <span>{statusIcon}</span>
+                    <div>
+                      <strong>{step.summary}</strong>
+                      <p className="step-status-label">
+                        {step.status === "done" ? "已完成"
+                          : step.status === "running" ? "进行中..."
+                          : step.status === "failed" ? "出错"
+                          : step.status === "waiting_confirm" ? "等待确认"
+                          : "待执行"}
+                      </p>
+                    </div>
+                  </article>
+                );
+              })
             )}
           </div>
         </section>
 
+        {/* 协同文档 */}
         <section className="panel editor-panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Scene C</p>
+            <div className="panel-title-group">
+              <FileText size={18} className="panel-icon" />
               <h2>协同文档</h2>
             </div>
-            <span>Y.Text + y-indexeddb</span>
-          </div>
-          <div className="tool-row">
-            <button className="secondary-button" onClick={() => insertRichBlock("table")}>
-              <Table2 size={16} />
-              插入表格
-            </button>
-            <button className="secondary-button" onClick={() => insertRichBlock("image")}>
-              <Image size={16} />
-              插入图片占位
-            </button>
+            <div className="panel-actions">
+              <button className="secondary-button" onClick={() => insertRichBlock("table")}>
+                <Table2 size={14} />
+                表格
+              </button>
+              <button className="secondary-button" onClick={() => insertRichBlock("image")}>
+                <Image size={14} />
+                图片
+              </button>
+            </div>
           </div>
           <textarea
             className="document-editor"
             value={documentText}
             onChange={(event) => updateDocument(event.target.value)}
-            placeholder="任一端编辑这里，其他端会实时同步。断网后会写入本地 IndexedDB，恢复后自动合并。"
+            placeholder="文档内容会由 Agent 自动生成，也可以手动编辑。多端实时同步。"
           />
         </section>
+      </section>
 
+      {/* ===== 下方两列：演示稿 / 交付 ===== */}
+      <section className="grid-bottom">
+        {/* PPT / 画布 */}
         <section className="panel slides-panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Scene D</p>
-              <h2>PPT / 自由画布</h2>
+            <div className="panel-title-group">
+              <Presentation size={18} className="panel-icon" />
+              <h2>演示稿</h2>
             </div>
             <div className="panel-actions">
-              <button className="icon-button" onClick={rehearseSlides} aria-label="排练">
-                <Mic size={18} />
-              </button>
-              <button className="icon-button" onClick={addSlideFromPrompt} aria-label="新增页面">
-                <Plus size={18} />
+              <button className="icon-button" onClick={addSlideFromPrompt} title="新增页面">
+                <Plus size={15} />
               </button>
             </div>
           </div>
           <div className="slide-list">
             {slides.length === 0 ? (
-              <p className="empty-state">启动 Agent 后会生成 5 页演示稿大纲。</p>
+              <p className="empty-state">Agent 启动后会自动生成演示稿</p>
             ) : (
               slides.map((slide, index) => (
                 <article className="slide-card" key={slide.id}>
@@ -263,32 +341,48 @@ export function App() {
           </div>
         </section>
 
+        {/* 总结与交付 */}
         <section className="panel delivery-panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Scene F</p>
-              <h2>总结与交付</h2>
+            <div className="panel-title-group">
+              <FileCheck2 size={18} className="panel-icon" />
+              <h2>交付物</h2>
             </div>
-            <FileCheck2 size={20} />
           </div>
-          <button className="primary-button" onClick={createDelivery}>
-            <Presentation size={18} />
-            生成交付物
-          </button>
+          <div className="delivery-actions">
+            <button className="primary-button" onClick={createDelivery}>
+              <Presentation size={15} />
+              生成交付物
+            </button>
+            <button className="secondary-button" onClick={() => {
+              const base = syncUrl.replace(/^ws(s?):\/\//, "http$1://");
+              window.open(`${base}/api/feishu/delivery/download-doc?workspaceId=${encodeURIComponent(workspaceId)}`, "_blank");
+            }}>
+              <Download size={15} />
+              下载文档
+            </button>
+            <button className="secondary-button" onClick={() => {
+              const base = syncUrl.replace(/^ws(s?):\/\//, "http$1://");
+              window.open(`${base}/api/feishu/delivery/download-ppt?workspaceId=${encodeURIComponent(workspaceId)}`, "_blank");
+            }}>
+              <Download size={15} />
+              下载 PPT
+            </button>
+          </div>
           {delivery ? (
             <div className="delivery-card">
               <label>
-                飞书文档链接
+                飞书文档
                 <input readOnly value={delivery.docLink} />
               </label>
               <label>
-                PPT 文件链接
+                PPT 文件
                 <input readOnly value={delivery.deckLink} />
               </label>
               <p>{delivery.archiveSummary}</p>
             </div>
           ) : (
-            <p className="empty-state">确认内容后生成飞书文档链接、PPT 文件链接和归档摘要。</p>
+            <p className="empty-state">确认内容后生成飞书文档链接和 PPT 下载</p>
           )}
         </section>
       </section>
