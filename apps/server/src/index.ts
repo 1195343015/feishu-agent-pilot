@@ -369,8 +369,15 @@ app.post("/api/feishu/delivery", async (request, reply) => {
     return { ok: false, error: "missing workspaceId" };
   }
 
+  const body = request.body as {
+    title?: string;
+    documentMarkdown?: string;
+    slides?: Array<{ title: string; notes: string }>;
+    taskTitle?: string;
+  } | undefined;
+
   try {
-    const delivery = await createDeliveryForWorkspace(workspaceId);
+    const delivery = await createDeliveryForWorkspace(workspaceId, body);
     writeDeliveryToRoom(workspaceId, delivery);
     return delivery;
   } catch (error) {
@@ -1183,17 +1190,43 @@ function objectToYMap(value: Record<string, unknown>): Y.Map<unknown> {
   return map;
 }
 
-async function createDeliveryForWorkspace(workspaceId: string): Promise<DeliveryArtifact> {
-  const room = getRoom(workspaceId);
-  const agentState = room.doc.getMap("agentState");
-  const task = (agentState.get("task") as Partial<AgentTask> | null) ?? null;
-  const documentMarkdown = room.doc.getText("document").toString();
-  const slides = room.doc.getArray<Y.Map<unknown>>("slides").toArray().map((slide, index) => ({
-    title: String(slide.get("title") ?? `第 ${index + 1} 页`),
-    notes: String(slide.get("notes") ?? "")
-  }));
+async function createDeliveryForWorkspace(
+  workspaceId: string,
+  body?: {
+    title?: string;
+    documentMarkdown?: string;
+    slides?: Array<{ title: string; notes: string }>;
+    taskTitle?: string;
+  }
+): Promise<DeliveryArtifact> {
+  // 优先使用前端传来的内容，否则从 room 读取
+  let documentMarkdown = body?.documentMarkdown ?? "";
+  let slides = body?.slides ?? [];
+  let taskTitle = body?.taskTitle;
 
-  // 从Markdown中提取一级标题作为文档标题
+  if (!documentMarkdown || !slides.length) {
+    try {
+      const room = getRoom(workspaceId);
+      if (!documentMarkdown) {
+        documentMarkdown = room.doc.getText("document").toString();
+      }
+      if (!slides.length) {
+        slides = room.doc.getArray<Y.Map<unknown>>("slides").toArray().map((slide, index) => ({
+          title: String(slide.get("title") ?? `第 ${index + 1} 页`),
+          notes: String(slide.get("notes") ?? "")
+        }));
+      }
+      if (!taskTitle) {
+        const agentState = room.doc.getMap("agentState");
+        const task = (agentState.get("task") as Partial<AgentTask> | null) ?? null;
+        taskTitle = task?.title;
+      }
+    } catch {
+      // room 不存在时忽略，使用前端传来的数据
+    }
+  }
+
+  // 从 Markdown 中提取标题
   let extractedTitle = "";
   const lines = documentMarkdown.split(/\r?\n/);
   for (const line of lines) {
@@ -1204,14 +1237,8 @@ async function createDeliveryForWorkspace(workspaceId: string): Promise<Delivery
     }
   }
 
-  let title = "";
-  if (extractedTitle) {
-    title = extractedTitle;
-  } else if (task?.title) {
-    title = task.title;
-  } else {
-    title = `Agent-Pilot 交付物 ${workspaceId}`;
-  }
+  let title = extractedTitle || taskTitle || `Agent-Pilot 交付物 ${workspaceId}`;
+
   const fallbackDocLink = `local://workspace/${encodeURIComponent(workspaceId)}/document`;
   const fallbackDeckLink = `local://workspace/${encodeURIComponent(workspaceId)}/slides`;
   let docLink = fallbackDocLink;
@@ -1235,7 +1262,7 @@ async function createDeliveryForWorkspace(workspaceId: string): Promise<Delivery
     id: randomUUID(),
     docLink,
     deckLink,
-    archiveSummary: `已归档「${task?.title ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT 大纲和 Agent 执行摘要。`,
+    archiveSummary: `已归档「${taskTitle ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT 大纲和 Agent 执行摘要。`,
     createdAt: new Date().toISOString()
   };
 }

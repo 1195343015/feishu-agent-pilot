@@ -395,21 +395,34 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
 
     const workspace = getSharedWorkspace(doc);
     const task = (workspace.agentState.get("task") as AgentTask | null) ?? null;
-    
+    const documentMarkdown = workspace.document.toString();
+    const slides = workspace.slides.toArray().map((slide, index) => ({
+      title: String((slide as any).get("title") ?? `第 ${index + 1} 页`),
+      notes: String((slide as any).get("notes") ?? "")
+    }));
+
     workspace.messages.push([
       chatMessageToYMap(createChatMessage({ role: "agent", content: "正在生成交付物，请稍候..." }))
     ]);
 
     try {
-      const response = await fetch(`${toHttpBaseUrl(get().syncUrl)}/api/feishu/delivery?workspaceId=${encodeURIComponent(get().workspaceId)}`, {
+      const url = `${toHttpBaseUrl(get().syncUrl)}/api/feishu/delivery?workspaceId=${encodeURIComponent(get().workspaceId)}`;
+      console.log("[delivery] POST", url, { slidesCount: slides.length, docLength: documentMarkdown.length });
+      const response = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
-        }
+        },
+        body: JSON.stringify({
+          documentMarkdown,
+          slides,
+          taskTitle: task?.title
+        })
       });
 
       if (!response.ok) {
-        throw new Error("交付物生成失败");
+        const body = await response.text().catch(() => "");
+        throw new Error(`交付物生成失败 (${response.status}): ${body}`);
       }
 
       const delivery = (await response.json()) as DeliveryArtifact;
@@ -424,10 +437,11 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
         chatMessageToYMap(createChatMessage({ role: "agent", content: "交付完成：已生成飞书文档链接、PPT 文件链接和归档摘要。" }))
       ]);
     } catch (error) {
+      console.error("[delivery] Error:", error);
       const fallbackDelivery = createDeliveryArtifact({
         workspaceId: get().workspaceId,
         taskTitle: task?.title ?? "Agent-Pilot 汇报",
-        slideCount: workspace.slides.length
+        slideCount: slides.length
       });
       const steps = ((workspace.agentState.get("steps") as AgentStep[] | undefined) ?? []).map((step) =>
         step.type === "delivery" ? { ...step, status: "done" as const, resultRef: fallbackDelivery.id } : step
@@ -437,7 +451,7 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
       workspace.agentState.set("steps", steps);
       workspace.agentState.set("status", "done");
       workspace.messages.push([
-        chatMessageToYMap(createChatMessage({ role: "agent", content: "交付完成：已生成本地预览链接。配置飞书权限后可生成正式飞书链接。" }))
+        chatMessageToYMap(createChatMessage({ role: "agent", content: "交付生成遇到问题，已生成本地预览链接。请确认服务端正常运行后重试。" }))
       ]);
     }
   },

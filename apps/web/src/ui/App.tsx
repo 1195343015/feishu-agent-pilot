@@ -6,6 +6,7 @@ import {
   Download,
   FileCheck2,
   FileText,
+  Gamepad2,
   Image,
   ListChecks,
   Loader2,
@@ -23,6 +24,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useWorkspaceSync } from "../sync/useWorkspaceSync";
+import { Game2048 } from "./Game2048";
 
 declare global {
   interface Window {
@@ -60,6 +62,8 @@ export function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [recognition, setRecognition] = useState<any | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showGame, setShowGame] = useState(false);
+  const [delivering, setDelivering] = useState(false);
   const chatFeedRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -142,6 +146,9 @@ export function App() {
             <Users size={14} />
             {onlineUsers}
           </span>
+          <button className={`game-btn ${agentStatus === "running" ? "pulse" : ""}`} onClick={() => setShowGame(true)} title="来局 2048">
+            <Gamepad2 size={16} />
+          </button>
           <button className={`icon-button settings-btn ${showSettings ? "active" : ""}`} onClick={() => setShowSettings(!showSettings)}>
             <Settings size={16} />
           </button>
@@ -244,6 +251,12 @@ export function App() {
               </p>
             </div>
           </div>
+          {agentStatus === "running" && (
+            <button className="game-hint-banner" onClick={() => setShowGame(true)}>
+              <Gamepad2 size={14} />
+              AI 生成中，来局 2048？
+            </button>
+          )}
         </aside>
 
         {/* 任务规划 */}
@@ -350,9 +363,13 @@ export function App() {
             </div>
           </div>
           <div className="delivery-actions">
-            <button className="primary-button" onClick={createDelivery}>
-              <Presentation size={15} />
-              生成交付物
+            <button className="primary-button" disabled={delivering} onClick={async () => {
+              setDelivering(true);
+              await createDelivery();
+              setDelivering(false);
+            }}>
+              {delivering ? <Loader2 size={15} className="spin" /> : <Presentation size={15} />}
+              {delivering ? "生成中..." : "生成交付物"}
             </button>
             <button className="secondary-button" onClick={() => {
               const base = syncUrl.replace(/^ws(s?):\/\//, "http$1://");
@@ -369,15 +386,20 @@ export function App() {
               下载 PPT
             </button>
           </div>
-          {delivery ? (
+          {delivering ? (
+            <div className="delivery-loading">
+              <Loader2 size={24} className="spin" />
+              <p>正在创建飞书文档和 PPT，请稍候...</p>
+            </div>
+          ) : delivery ? (
             <div className="delivery-card">
               <label>
                 飞书文档
-                <input readOnly value={delivery.docLink} />
+                <a className="delivery-link" href={delivery.docLink} target="_blank" rel="noopener">{delivery.docLink}</a>
               </label>
               <label>
                 PPT 文件
-                <input readOnly value={delivery.deckLink} />
+                <a className="delivery-link" href={delivery.deckLink} target="_blank" rel="noopener">{delivery.deckLink}</a>
               </label>
               <p>{delivery.archiveSummary}</p>
             </div>
@@ -386,6 +408,8 @@ export function App() {
           )}
         </section>
       </section>
+
+      {showGame && <Game2048 onClose={() => setShowGame(false)} agentStatus={agentStatus} taskTitle={task?.title ?? null} />}
     </main>
   );
 }
