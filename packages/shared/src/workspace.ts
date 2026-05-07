@@ -94,7 +94,7 @@ export function createDeliveryArtifact(input: {
     id: crypto.randomUUID(),
     docLink: `https://feishu.example/docs/${slug}`,
     deckLink: `https://feishu.example/files/${slug}-deck.pptx`,
-    archiveSummary: `已归档「${input.taskTitle}」：包含 1 份需求文档、${input.slideCount} 页演示材料和 Agent 执行摘要。`,
+    archiveSummary: `已归档「${input.taskTitle}」：包含 1 份需求文档、${input.slideCount} 页 PPT。`,
     createdAt: now
   };
 }

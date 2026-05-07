@@ -463,7 +463,7 @@ export const useWorkspaceSync = create<WorkspaceSyncState>((set, get) => ({
     const text = getSharedWorkspace(doc).document;
     const block =
       kind === "table"
-        ? "\n\n## 关键对比表\n| 模块 | 价值 | 演示点 |\n| --- | --- | --- |\n| IM | 捕捉需求 | 飞书群聊指令 |\n| Doc | 沉淀内容 | 多端协同编辑 |\n| PPT | 汇报交付 | 自动生成大纲 |\n"
+        ? "\n\n## 关键对比表\n| 模块 | 价值 | 演示点 |\n| --- | --- | --- |\n| IM | 捕捉需求 | 飞书群聊指令 |\n| Doc | 沉淀内容 | 多端协同编辑 |\n| PPT | 汇报交付 | 自动生成演示稿 |\n"
         : "\n\n## 富媒体占位\n![架构图](feishu-agent-pilot-architecture.png)\n";
     text.insert(text.length, block);
   },

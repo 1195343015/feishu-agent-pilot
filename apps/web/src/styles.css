@@ -126,6 +126,18 @@ button, input, textarea {
   font-weight: 500;
 }
 
+.topbar .status-pill.online-count {
+  background: rgba(79, 110, 247, 0.15);
+  color: #a5b4fc;
+  font-size: 13px;
+}
+
+.topbar .status-pill.online-count strong {
+  font-size: 15px;
+  font-weight: 800;
+  color: #c7d2fe;
+}
+
 .topbar .status-pill.online {
   background: rgba(34, 197, 94, 0.12);
   color: #86efac;
@@ -708,6 +720,79 @@ input:focus, textarea:focus {
 }
 
 @media (max-width: 720px) {
+  .topbar {
+    padding: 0 12px;
+    height: auto;
+    min-height: 44px;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .topbar-left {
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .topbar-logo {
+    width: 26px;
+    height: 26px;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .topbar-title {
+    font-size: 13px;
+  }
+
+  .topbar-subtitle {
+    display: none;
+  }
+
+  .status-strip {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .status-pill {
+    height: 22px;
+    padding: 0 7px;
+    font-size: 10px;
+    gap: 3px;
+  }
+
+  .status-pill svg {
+    width: 12px;
+    height: 12px;
+  }
+
+  .llm-full {
+    display: none;
+  }
+
+  .llm-short {
+    display: inline;
+  }
+
+  .game-btn,
+  .settings-btn {
+    width: 26px !important;
+    height: 26px !important;
+  }
+
+  .game-btn svg,
+  .settings-btn svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .shell {
+    padding: 10px;
+    padding-top: 64px;
+  }
+
   .grid-top,
   .grid-bottom {
     grid-template-columns: 1fr;
@@ -715,19 +800,132 @@ input:focus, textarea:focus {
 
   .im-panel {
     grid-column: auto;
+    min-height: auto;
   }
 
-  .topbar {
-    padding: 0 16px;
+  .panel {
+    padding: 12px;
+    border-radius: 10px;
   }
 
-  .topbar-subtitle {
-    display: none;
+  .panel-header {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
   }
 
-  .shell {
-    padding: 16px;
-    padding-top: 68px;
+  .panel-title-group h2 {
+    font-size: 14px;
+  }
+
+  .chat-feed {
+    max-height: 180px;
+    min-height: 40px;
+  }
+
+  .im-panel textarea {
+    font-size: 14px;
+  }
+
+  .document-editor {
+    min-height: 180px;
+    font-size: 12px;
+  }
+
+  .delivery-actions {
+    flex-wrap: wrap;
+  }
+
+  .delivery-actions button {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .slide-card {
+    grid-template-columns: 24px 1fr;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .slide-card span {
+    font-size: 10px;
+    line-height: 24px;
+  }
+
+  .slide-card input {
+    font-size: 12px;
+  }
+
+  .step-card {
+    grid-template-columns: 22px 1fr;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .step-card > span {
+    width: 22px;
+    height: 22px;
+    font-size: 10px;
+  }
+
+  .step-card strong {
+    font-size: 12px;
+  }
+
+  .primary-button,
+  .secondary-button {
+    font-size: 12px;
+    height: 32px;
+  }
+
+  .task-card {
+    grid-template-columns: 24px 1fr;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .task-icon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .task-title {
+    font-size: 11px;
+  }
+
+  .task-subtitle {
+    font-size: 10px;
+  }
+
+  .game-modal {
+    width: calc(100vw - 24px);
+    max-width: 340px;
+    padding: 14px;
+  }
+
+  .game-cell {
+    font-size: 20px;
+    border-radius: 4px;
+  }
+
+  .game-cell.wide {
+    font-size: 14px;
+  }
+
+  .game-board {
+    gap: 5px;
+    padding: 5px;
+  }
+
+  .game-header h3 {
+    font-size: 24px;
+  }
+
+  .game-score-box {
+    padding: 2px 8px;
+  }
+
+  .game-score-box strong {
+    font-size: 13px;
   }
 }
 

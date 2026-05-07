@@ -132,19 +132,19 @@ export function App() {
         </div>
         <div className="status-strip">
           {llmStatus && (
-            <span className={`status-pill ${llmStatus.status === "ok" ? "online" : llmStatus.status === "error" ? "offline" : ""}`}>
+            <span className={`status-pill llm-pill ${llmStatus.status === "ok" ? "online" : llmStatus.status === "error" ? "offline" : ""}`}>
               {llmStatus.status === "ok" ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
-              {llmStatus.model}
-              {llmStatus.latencyMs != null && ` · ${llmStatus.latencyMs}ms`}
+              <span className="llm-full">{llmStatus.model}{llmStatus.latencyMs != null && ` · ${llmStatus.latencyMs}ms`}</span>
+              <span className="llm-short">{llmStatus.status === "ok" ? "AI 就绪" : "AI 异常"}</span>
             </span>
           )}
           <span className={`status-pill ${isConnected ? "online" : "offline"}`}>
             {isConnected ? <Cloud size={14} /> : <CloudOff size={14} />}
             {isConnected ? "已连接" : connection}
           </span>
-          <span className="status-pill">
+          <span className="status-pill online-count">
             <Users size={14} />
-            {onlineUsers}
+            <strong>{onlineUsers}</strong>
           </span>
           <button className={`game-btn ${agentStatus === "running" ? "pulse" : ""}`} onClick={() => setShowGame(true)} title="来局 2048">
             <Gamepad2 size={16} />

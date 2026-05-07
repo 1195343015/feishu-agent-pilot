@@ -275,7 +275,7 @@ app.get("/test/ppt/generate", async (_, reply) => {
       { title: "项目背景与痛点", notes: "说明项目来自 IM 讨论，强调跨应用手工整理成本。\n目前团队协作中，很多需求都始于群聊讨论，需要手动整理成文档和PPT，浪费大量时间。\n跨工具切换导致信息丢失，同步成本很高，需要反复确认信息一致性。\n我们的方案可以实现从讨论到交付物的全自动化，无需人工干预。" },
       { title: "Agent-Pilot 目标", notes: "说明 Agent 主驾驶、GUI 辅助操作台的产品定位。\n用户只需要通过自然语言下达指令，AI自动完成需求分析、文档生成、PPT制作等工作。\nGUI界面用于查看进度、微调内容，AI负责核心流程的驱动。\n最终实现从需求到汇报的全链路自动化，提升团队效率80%以上。" },
       { title: "多端协同框架", notes: "解释移动端和桌面端通过 Yjs 实时同步状态和内容。\n基于CRDT算法实现无冲突的实时同步，支持多人同时编辑。\n一端的操作会实时同步到所有其他端，包括文本编辑、PPT修改等所有操作。\n支持离线编辑，网络恢复后自动合并，不会丢失数据。" },
-      { title: "文档到 PPT 的自动化链路", notes: "展示从 IM 指令到文档，再到演示稿的编排过程。\nAI自动理解用户指令，拆解为任务步骤，生成需求文档。\n基于文档内容自动提取核心信息，生成结构清晰的PPT大纲。\n自动生成标准PPT文件并上传到飞书云空间，直接返回可访问链接。" },
+      { title: "文档到 PPT 的自动化链路", notes: "展示从 IM 指令到文档，再到演示稿的编排过程。\nAI自动理解用户指令，拆解为任务步骤，生成需求文档。\n基于文档内容自动提取核心信息，生成结构清晰的PPT。\n自动生成标准PPT文件并上传到飞书云空间，直接返回可访问链接。" },
       { title: "交付物与后续计划", notes: "总结飞书文档链接、PPT 文件和归档摘要。\n交付物包括可编辑的飞书文档链接、可下载的PPT文件、自动生成的归档摘要。\n后续计划支持富媒体内容、语音指令、更智能的内容迭代能力。\n持续优化生成效果，支持更多定制化的模板和样式。" }
     ];
 
@@ -748,7 +748,7 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
     "## 目标",
     "- 捕捉 IM 中的业务需求和上下文",
     "- 自动生成可编辑的需求文档",
-    "- 根据文档结构生成汇报 PPT 大纲",
+    "- 根据文档结构生成汇报 PPT",
     "- 支持移动端和桌面端实时同步修改",
     "- 最终交付飞书文档链接、PPT 文件和归档摘要",
     "",
@@ -760,11 +760,11 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
 
   return {
     provider: "fallback",
-    summary: "已基于本地 fallback 生成任务计划、需求文档和 PPT 大纲。",
+    summary: "已基于本地 fallback 生成任务计划、需求文档和 PPT。",
     steps: [
       { type: "plan", summary: "理解 IM 指令并拆解任务" },
       { type: "doc_generate", summary: "生成需求文档草稿" },
-      { type: "slide_generate", summary: "生成汇报 PPT 大纲" },
+      { type: "slide_generate", summary: "生成汇报 PPT" },
       { type: "delivery", summary: "生成飞书文档链接和归档摘要" }
     ],
     documentMarkdown,
@@ -800,7 +800,7 @@ function createFallbackGeneration(prompt: string, context: string): AgentGenerat
         title: "文档到 PPT 的自动化链路",
         notes: [
           "Agent 自动解析 IM 对话，提取关键信息生成结构化文档",
-          "文档可实时编辑，修改后自动同步更新 PPT 大纲",
+          "文档可实时编辑，修改后自动同步更新 PPT",
           "支持自然语言指令调整 PPT（如「增加一页技术方案」）",
           "完整迭代闭环：修改文档 → 更新 PPT → 生成交付物"
         ].join("\n")
@@ -852,7 +852,7 @@ function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask
   writePendingFeishuTaskToRoom(input, workspaceId, { appendUserMessage: false });
   app.log.info({ chatId: input.chatId, workspaceId, source: input.source }, "Queued Feishu IM event");
 
-  void sendFeishuText(input.chatId, `收到，Agent-Pilot 正在生成需求文档和 PPT 大纲。\n\nWorkspace: ${workspaceId}`);
+  void sendFeishuText(input.chatId, `收到，Agent-Pilot 正在生成需求文档和 PPT。\n\nWorkspace: ${workspaceId}`);
 
   void runFeishuMessageTask(input, workspaceId).catch((error) => {
     app.log.error({ error, chatId: input.chatId, workspaceId }, "Feishu Agent task failed");
@@ -861,9 +861,17 @@ function queueFeishuMessageTask(input: FeishuMessageTaskInput): FeishuQueuedTask
   return { workspaceId, action: "task.queued.from_im" };
 }
 
+function extractTitleFromMarkdown(markdown: string): string {
+  for (const line of markdown.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("# ")) return trimmed.replace(/^#\s+/, "").trim();
+  }
+  return "";
+}
+
 async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: string): Promise<void> {
   const startedAt = performance.now();
-  
+
   // 获取已有上下文，实现多轮迭代
   const room = getRoom(workspaceId);
   const existingDocument = room.doc.getText("document").toString();
@@ -871,18 +879,18 @@ async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: 
     title: String(slide.get("title") ?? ""),
     notes: String(slide.get("notes") ?? "")
   }));
-  
+
   let context = `飞书会话 ${input.chatId} 中的 IM 指令`;
-  // 如果有已有内容，将其加入上下文用于迭代修改
   if (existingDocument.trim() || existingSlides.length > 0) {
-    context += `\n\n已有的文档内容：\n${existingDocument}\n\n已有的PPT大纲：\n${existingSlides.map((s, i) => `${i+1}. ${s.title}: ${s.notes}`).join("\n")}\n\n请根据用户最新的修改指令，基于以上已有内容进行迭代更新，不要完全重新生成。`;
+    context += `\n\n已有的文档内容：\n${existingDocument}\n\n已有的PPT：\n${existingSlides.map((s, i) => `${i+1}. ${s.title}: ${s.notes}`).join("\n")}\n\n请根据用户最新的修改指令，基于以上已有内容进行迭代更新，不要完全重新生成。`;
   }
 
+  // === 第一步：生成文档 ===
   const generation = await generateAgentPlan(input.prompt, context);
   const generationMs = Math.round(performance.now() - startedAt);
   app.log.info(
     { chatId: input.chatId, workspaceId, provider: generation.provider, generationMs },
-    "Feishu Agent generation completed"
+    "Feishu Agent document generation completed"
   );
 
   writeAgentGenerationToRoom({
@@ -893,31 +901,73 @@ async function runFeishuMessageTask(input: FeishuMessageTaskInput, workspaceId: 
     generation
   });
 
-  await sendFeishuText(input.chatId, `Agent-Pilot 已启动任务：${generation.summary}\n\n正在生成交付物，请稍候...`);
-
-  // 自动生成交付物并发送给用户
+  // 立刻创建飞书文档并回复链接
+  let docLink = "";
   try {
-    const delivery = await createDeliveryForWorkspace(workspaceId);
-    writeDeliveryToRoom(workspaceId, delivery);
-    
+    const title = extractTitleFromMarkdown(generation.documentMarkdown) || input.prompt;
+    const documentId = await createFeishuDocument(title, generation.documentMarkdown, []);
+    docLink = toFeishuDocLink(documentId);
+    await sendFeishuText(input.chatId, `📄 文档已生成：${docLink}\n\n正在生成 PPT 演示稿，请稍候...`);
+  } catch (error) {
+    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Feishu doc creation failed");
+    await sendFeishuText(input.chatId, `📄 文档已生成：${generation.summary}\n\n正在生成 PPT 演示稿，请稍候...`);
+  }
+
+  // === 第二步：生成 PPT 幻灯片 ===
+  const slideResult = await generateSlidesFromDoc(input.prompt, generation.documentMarkdown);
+  app.log.info(
+    { chatId: input.chatId, workspaceId, slideCount: slideResult.slides.length },
+    "Feishu Agent slides generation completed"
+  );
+
+  // 将幻灯片写入 room
+  const currentRoom = getRoom(workspaceId);
+  currentRoom.doc.transact(() => {
+    const slidesArr = currentRoom.doc.getArray("slides");
+    slidesArr.delete(0, slidesArr.length);
+    slideResult.slides.forEach((slide) => {
+      slidesArr.push([
+        objectToYMap({
+          id: randomUUID(),
+          title: slide.title,
+          notes: slide.notes,
+          elements: []
+        })
+      ]);
+    });
+  });
+
+  // === 第三步：生成 PPT 并回复链接 ===
+  try {
+    const title = extractTitleFromMarkdown(generation.documentMarkdown) || input.prompt;
+    const presentationId = await createFeishuPresentation(`${title} - PPT`, slideResult.slides);
+    const deckLink = toFeishuPresentationLink(presentationId);
+
+    writeDeliveryToRoom(workspaceId, {
+      id: randomUUID(),
+      docLink: docLink || `local://workspace/${encodeURIComponent(workspaceId)}/document`,
+      deckLink,
+      archiveSummary: `已归档「${input.prompt}」：包含 1 份需求文档、${slideResult.slides.length} 页 PPT。`,
+      createdAt: new Date().toISOString()
+    });
+
     await sendFeishuText(
       input.chatId,
       [
-        "✅ 任务已完成，交付物已生成：",
-        `📄 飞书文档：${delivery.docLink}`,
-        `📊 PPT演示稿：${delivery.deckLink}`,
+        "✅ PPT 已生成：",
+        `📊 ${deckLink}`,
         "",
-        delivery.archiveSummary
+        `共 ${slideResult.slides.length} 页，可在飞书直接查看和编辑。`
       ].join("\n")
     );
   } catch (error) {
-    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Auto delivery failed");
-    await sendFeishuText(input.chatId, "✅ 任务已完成，交付物生成成功，可以在 Web 端查看和编辑。");
+    app.log.warn({ error: toErrorInfo(error), workspaceId }, "Feishu PPT delivery failed");
+    await sendFeishuText(input.chatId, "✅ PPT 内容已生成，可在 Web 端查看。PPT 链接生成失败，请稍后重试。");
   }
 
   app.log.info(
     { chatId: input.chatId, workspaceId },
-    "Feishu task completed with auto delivery"
+    "Feishu task completed with full delivery"
   );
 }
 
@@ -929,7 +979,7 @@ async function runFeishuDeliveryTask(input: FeishuMessageTaskInput, workspaceId:
     [
       "交付物已生成：",
       `飞书文档：${delivery.docLink}`,
-      `PPT/大纲：${delivery.deckLink}`,
+      `PPT/演示稿：${delivery.deckLink}`,
       "",
       delivery.archiveSummary
     ].join("\n")
@@ -993,7 +1043,7 @@ function writePendingFeishuTaskToRoom(
         taskId,
         type: "plan",
         status: "running",
-        summary: "已收到飞书消息，正在生成任务计划、需求文档和 PPT 大纲"
+        summary: "已收到飞书消息，正在生成任务计划、需求文档和 PPT"
       }
     ]);
   });
@@ -1035,7 +1085,7 @@ function buildProgressReply(workspaceId: string): string {
     `状态：${status}`,
     `步骤：已完成 ${done}/${steps.length}`,
     `文档：${documentLength > 0 ? `${documentLength} 字符` : "未生成"}`,
-    `PPT/大纲：${slideCount} 页`,
+    `PPT：${slideCount} 页`,
     delivery ? `交付：${delivery.docLink}` : "交付：未生成"
   ].join("\n");
 }
@@ -1262,7 +1312,7 @@ async function createDeliveryForWorkspace(
     id: randomUUID(),
     docLink,
     deckLink,
-    archiveSummary: `已归档「${taskTitle ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT 大纲和 Agent 执行摘要。`,
+    archiveSummary: `已归档「${taskTitle ?? "Agent-Pilot 汇报"}」：包含 1 份需求文档、${slides.length} 页 PPT。`,
     createdAt: new Date().toISOString()
   };
 }
@@ -1280,7 +1330,7 @@ function writeDeliveryToRoom(workspaceId: string, delivery: DeliveryArtifact): v
     agentState.set("status", "done");
     appendAgentMessageToRoom(
       workspaceId,
-      `交付完成：已生成飞书文档链接、PPT 大纲链接和归档摘要。\n${delivery.docLink}`
+      `交付完成：已生成飞书文档链接、PPT 链接和归档摘要。\n${delivery.docLink}`
     );
   });
 }
